@@ -1,0 +1,11 @@
+# Требуется Python версии: 3.8, 3.9, 3.10
+# (Проверено и рекомендуется Python 3.10.x)
+moviepy==1.0.3                 
+librosa==0.9.2                 
+numpy==1.24.4                  
+scipy==1.10.1                  
+soundfile==0.12.1              
+opencv-python==4.9.0.80        
+Pillow==10.1.0                 
+scenedetect[opencv]==0.6.0     
+imageio-ffmpeg>=0.5.1
