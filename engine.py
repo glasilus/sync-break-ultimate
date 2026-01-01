@@ -142,18 +142,18 @@ class BreakcoreEngine:
         def fl(gf, t):
             frame = gf(t)
             img_arr = frame.copy()
-            h, w, _ = img_arr.shape
+            h, w, channels = img_arr.shape
             
             sort_h = int(h * (0.1 + intensity * 0.6))
             y_start = random.randint(0, h - sort_h)
             
             crop = img_arr[y_start:y_start+sort_h, :, :]
-            pixels = crop.reshape(-1, 3)
-            lum = pixels.sum(axis=1)
+            pixels = crop.reshape(-1, channels)
+            lum = pixels[:, :3].sum(axis=1)
             sorted_indices = np.argsort(lum)
             
             sorted_pixels = pixels[sorted_indices]
-            sorted_crop = sorted_pixels.reshape(sort_h, w, 3)
+            sorted_crop = sorted_pixels.reshape(sort_h, w, channels)
             img_arr[y_start:y_start+sort_h, :, :] = sorted_crop
             return img_arr
 
@@ -301,7 +301,7 @@ class BreakcoreEngine:
                     if random.random() < (0.15 + chaos * 0.2):
                         ov_path = random.choice(overlay_files)
                         try:
-                            img = Image.open(ov_path)
+                            img = Image.open(ov_path).convert("RGBA")
                             # Логика ресайза оверлея
                             max_h_target = self.target_resolution[1] // 2
                             if img.height > max_h_target * 1.5:
