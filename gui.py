@@ -57,6 +57,7 @@ class App(tk.Tk):
         self.temp_preview_path = "temp_preview.mp4"
 
         # Плеер и его состояние
+        self.progress_var = tk.DoubleVar(value=0)
         self.video_cap = None
         self.playback_thread = None
         self.stop_playback = threading.Event()
@@ -182,6 +183,10 @@ class App(tk.Tk):
         self.btn_video = self.mk_btn(f_frame, "Load Source Video", self.sel_video)
         self.btn_overlay = self.mk_btn(f_frame, "Load Overlays Folder", self.sel_ov)
 
+        self.btn_audio.pack(fill="x", padx=5, pady=2)
+        self.btn_video.pack(fill="x", padx=5, pady=2)
+        self.btn_overlay.pack(fill="x", padx=5, pady=2)
+
         # Пресеты (В отдельной sunken панели)
         preset_panel = self.mk_panel(content_frame, text="Presets")
         tk.Label(preset_panel, text="Load Configuration:").pack(side="left", padx=5)
@@ -193,15 +198,19 @@ class App(tk.Tk):
         # Tabs
         self.tab_view = ttk.Notebook(content_frame, style='W95.TNotebook')
         self.tab_view.pack(pady=10, padx=5, fill="both", expand=True)
-        self.tab_view.add(self.mk_tab("I. Cut Logic"), text="I. Cut Logic")
-        self.tab_view.add(self.mk_tab("II. Datamix Core"), text="II. Datamix Core")
-        self.tab_view.add(self.mk_tab("III. Rhythm FX"), text="III. Rhythm FX")
-        self.tab_view.add(self.mk_tab("IV. Finals"), text="IV. Finals")
+        self.tab_cut_frame = self.mk_tab("I. Cut Logic")
+        self.tab_datamix_frame = self.mk_tab("II. Datamix Core")
+        self.tab_rhythm_frame = self.mk_tab("III. Rhythm FX")
+        self.tab_finals_frame = self.mk_tab("IV. Finals")
+        self.tab_view.add(self.tab_cut_frame, text="I. Cut Logic")
+        self.tab_view.add(self.tab_datamix_frame, text="II. Datamix Core")
+        self.tab_view.add(self.tab_rhythm_frame, text="III. Rhythm FX")
+        self.tab_view.add(self.tab_finals_frame, text="IV. Finals")
 
-        self._setup_cut_logic(self.tab_view.winfo_children()[0])
-        self._setup_datamix(self.tab_view.winfo_children()[1])
-        self._setup_rhythm_fx(self.tab_view.winfo_children()[2])
-        self._setup_finals(self.tab_view.winfo_children()[3])
+        self._setup_cut_logic(self.tab_cut_frame)
+        self._setup_datamix(self.tab_datamix_frame)
+        self._setup_rhythm_fx(self.tab_rhythm_frame)
+        self._setup_finals(self.tab_finals_frame)
         
         # --- ПРАВАЯ КОЛОНКА (Плеер и Консоль) ---
         self.right_frame = ttk.Frame(self, style='W95.TFrame')
@@ -232,7 +241,7 @@ class App(tk.Tk):
         self.btn_stop.pack(side="left", padx=5, expand=True, fill="x")
 
         # Progress Bar
-        self.progress = ttk.Progressbar(content_frame_r, style='green.W95.Horizontal.TProgressbar', mode='determinate', maximum=100)
+        self.progress = ttk.Progressbar(content_frame_r, style='green.W95.Horizontal.TProgressbar', mode='determinate', maximum=100, variable=self.progress_var)
         self.progress.pack(fill="x", padx=10, pady=5)
 
         # Консоль (Имитация sunken text field)
@@ -390,11 +399,11 @@ class App(tk.Tk):
         def progress_update(message=None, value=None):
             self.after(0, self.log, message)
             if not preview_mode and value is not None:
-                 self.after(0, self.progress.set, value)
+                 self.after(0, self.progress_var.set, value)
         
         engine = BreakcoreEngine(cfg, progress_callback=progress_update)
         try:
-            engine.run(max_duration=cfg.get('max_duration'))
+            engine.run(max_output_duration=cfg.get('max_duration'))
             self.after(0, self.log, f"--- {'PREVIEW' if preview_mode else 'FULL RENDER'} COMPLETE! Output: {cfg['output_path']} ---")
             
             if preview_mode:
@@ -406,7 +415,7 @@ class App(tk.Tk):
             self.after(0, lambda: self.btn_preview.configure(state="normal"))
             self.after(0, lambda: self.btn_run_full.configure(state="normal"))
             self.after(0, lambda: self.progress.stop())
-            self.after(0, lambda: self.progress.set(0))
+            self.after(0, lambda: self.progress_var.set(0))
             if preview_mode:
                 self.after(0, lambda: self.progress.configure(mode='determinate', value=0))
 

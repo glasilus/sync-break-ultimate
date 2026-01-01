@@ -66,11 +66,11 @@ class BreakcoreEngine:
         if not os.path.exists(self.cfg['audio_path']):
             raise FileNotFoundError(f"Audio file not found: {self.cfg['audio_path']}")
 
-    def log(self, message: str):
+    def log(self, message: str, value: Optional[int] = None):
         """Вывод логов в консоль GUI и stdout."""
         print(f"[ENGINE] {message}")
         if self.progress_callback:
-            self.progress_callback(message)
+            self.progress_callback(message, value)
 
     # --- 1. АНАЛИЗ ВИДЕО (Scene Detection) ---
     def detect_scenes(self, video_duration: float):
