@@ -371,7 +371,21 @@ class BreakcoreEngine:
                     # Шанс оверлея 15% + хаос
                     if random.random() < (0.15 + chaos * 0.2):
                         ov_path = random.choice(overlay_files)
-                        ov_clip = ImageClip(ov_path).set_duration(full_segment.duration)
+                        try:
+                            img = Image.open(ov_path)
+                            # Максимальная высота, которую мы будем использовать в MoviePy
+                            max_h_target = main_video.h // 2
+                            # Изменение размера PIL-изображения, если оно слишком большое
+                            if img.height > max_h_target * 1.5: # Проверка на слишком большое изображение
+                                # Масштабирование пропорционально для уменьшения потребления памяти
+                                ratio = max_h_target * 1.5 / img.height
+                                new_size = (int(img.width * ratio), int(img.height * ratio))
+                                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                            # Создаем MoviePy клип из массива NumPy (обязательно для PIL)
+                            ov_clip = ImageClip(np.array(img)).set_duration(full_segment.duration)
+                        except Exception as e:
+                            self.log(f"WARNING: Skipping overlay {ov_path} due to load error: {e}")
+                            continue # Переходим к следующему сегменту
                         
                         # Рандомный размер и позиция
                         max_h = main_video.h // 2
