@@ -309,8 +309,7 @@ class BreakcoreEngine:
                                 new_size = (int(img.width * ratio), int(img.height * ratio))
                                 img = img.resize(new_size, Image.Resampling.LANCZOS)
                             
-                            # Оптимизация: передаем PIL Image напрямую
-                            ov_clip = ImageClip(img).set_duration(full_segment.duration)
+                            ov_clip = ImageClip(np.array(img)).set_duration(full_segment.duration)
                             
                             max_h = self.target_resolution[1] // 2
                             # Рандомный ресайз
