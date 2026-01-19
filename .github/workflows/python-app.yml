@@ -1,125 +1,84 @@
-name: Build and Release (cross-platform)
+name: Build Windows EXE (Python 3.10)
 
-# Триггеры: ручной запуск и пуш тега v*
 on:
   workflow_dispatch:
   push:
+    branches: [ "main" ]
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
-  contents: read
-  packages: write
+  contents: write
 
 jobs:
-  build:
-    # матрица: Windows, Linux, macOS
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+  build-windows:
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10 (required)
+      - name: Set up Python 3.10 (STRICT)
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'   # <- обязательно 3.10
+          python-version: "3.10"
+
+      - name: Verify Python version
+        run: |
+          python --version
+          pip --version
 
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
-      - name: Install project dependencies (if any)
+      - name: Install project dependencies
         run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        shell: bash
+          pip install -r requirements.txt
 
-      - name: Install PyInstaller (not in requirements.txt)
-        run: python -m pip install pyinstaller
-
-      - name: Build with PyInstaller on Windows
-        if: runner.os == 'Windows'
+      - name: Install PyInstaller
         run: |
-          pyinstaller --onefile --noconsole gui.py
-          mkdir output || New-Item -ItemType Directory -Path output
-          # перемещаем и переименовываем в читабельное имя
-          Move-Item -Path dist\gui.exe -Destination output\sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-windows-x64.exe
-        shell: powershell
+          pip install pyinstaller
 
-      - name: Build with PyInstaller on Linux
-        if: runner.os == 'Linux'
+      - name: Debug environment (important)
         run: |
-          pyinstaller --onefile gui.py
-          mkdir -p output
-          # упакуем бинарь в tar.gz для удобства загрузки
-          chmod +x dist/gui
-          cp dist/gui output/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-linux-x86_64
-          tar -czf output/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-linux-x86_64.tar.gz -C output sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-linux-x86_64
-          # оставим только tar.gz (удалим сырой бинарь)
-          rm output/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-linux-x86_64 || true
-        shell: bash
+          python - << EOF
+          import sys, os
+          print("Python:", sys.version)
+          print("Files:", os.listdir("."))
+          EOF
 
-      - name: Build with PyInstaller on macOS
-        if: runner.os == 'macOS'
+      - name: Build EXE with PyInstaller (stable config)
         run: |
-          pyinstaller --onefile gui.py
-          mkdir -p output
-          chmod +x dist/gui
-          cp dist/gui output/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-macos-universal
-          tar -czf output/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-macos-universal.tar.gz -C output sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-macos-universal
-          rm output/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-3.10-macos-universal || true
-        shell: bash
+          pyinstaller ^
+            --onefile ^
+            --noconsole ^
+            --clean ^
+            --name sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e ^
+            --collect-all cv2 ^
+            --collect-all moviepy ^
+            --collect-all librosa ^
+            --collect-all scipy ^
+            --collect-all soundfile ^
+            --hidden-import=imageio_ffmpeg ^
+            --hidden-import=scenedetect ^
+            --hidden-import=scenedetect.detectors ^
+            gui.py
 
-      - name: List output
-        run: ls -la output || true
-        shell: bash
+      - name: Verify build output
+        run: |
+          dir dist
 
-      - name: Upload artifact (platform binary)
+      - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-artifact
-          path: output/*
+          name: sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-windows-exe
+          path: dist/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e.exe
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release_files
-
-      - name: Create GitHub Release (if triggered by tag)
-        id: create_release
+      - name: Create GitHub Release (only for tags)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
+          files: |
+            dist/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload all artifacts to the release
-        if: steps.create_release.outputs.upload_url != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
-        run: |
-          # upload_url содержит шаблон вида https://uploads.github.com/repos/OWNER/REPO/releases/ID/assets{?name,label}
-          # находим все файлы внутри release_files и загружаем
-          set -e
-          for f in $(find release_files -type f); do
-            filename=$(basename "$f")
-            echo "Uploading $filename ..."
-            curl --fail -s -X POST \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$f" "${UPLOAD_URL}?name=${filename}"
-            echo "Uploaded $filename"
-          done
-        shell: bash
-
-      - name: Release created info
-        if: steps.create_release.outputs.upload_url != ''
-        run: echo "Release ${{ github.ref_name }} created and assets uploaded."
