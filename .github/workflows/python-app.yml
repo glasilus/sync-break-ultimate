@@ -41,11 +41,12 @@ jobs:
           pip install pyinstaller
 
       - name: Debug project structure
+        shell: bash
         run: |
           echo "Root directory:"
-          dir
+          ls -la
           echo "Python sys.path:"
-          python - << EOF
+          python - << 'EOF'
           import sys
           from pprint import pprint
           pprint(sys.path)
