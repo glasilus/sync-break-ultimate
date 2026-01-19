@@ -62,7 +62,6 @@ jobs:
             --noconsole ^
             --clean ^
             --noupx ^
-            --runtime-tmpdir %TEMP% ^
             --name sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e ^
             --collect-all cv2 ^
             --collect-all moviepy ^
