@@ -62,7 +62,7 @@ jobs:
             --noconsole ^
             --clean ^
             --noupx ^
-            --runtime-tmpdir . ^
+            --runtime-tmpdir %TEMP% ^
             --name sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e ^
             --collect-all cv2 ^
             --collect-all moviepy ^
@@ -70,6 +70,10 @@ jobs:
             --collect-all scipy ^
             --collect-all soundfile ^
             --collect-all imageio_ffmpeg ^
+            --copy-metadata imageio ^
+            --copy-metadata moviepy ^
+            --collect-submodules moviepy ^
+            --hidden-import=imageio ^
             --hidden-import=imageio_ffmpeg ^
             --hidden-import=scenedetect ^
             --hidden-import=scenedetect.detectors ^
