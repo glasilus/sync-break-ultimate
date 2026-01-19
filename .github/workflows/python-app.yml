@@ -53,8 +53,9 @@ jobs:
           EOF
 
       - name: Build GUI EXE with PyInstaller
+        shell: cmd
         env:
-          IMAGEIO_FFMPEG_EXE: ""
+          IMAGEIO_FFMPEG_EXE:
         run: |
           pyinstaller ^
             --onefile ^
