@@ -1,4 +1,4 @@
-name: Build Windows EXE (Python 3.10)
+name: Build Windows EXE 
 
 on:
   workflow_dispatch:
@@ -12,18 +12,19 @@ permissions:
 
 jobs:
   build-windows:
+    name: Build EXE (Windows)
     runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10 (STRICT)
-        uses: actions/setup-python@v4
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Verify Python version
+      - name: Verify Python environment
         run: |
           python --version
           pip --version
@@ -39,33 +40,42 @@ jobs:
         run: |
           pip install pyinstaller
 
-      - name: Debug environment (important)
+      - name: Debug project structure
         run: |
+          echo "Root directory:"
+          dir
+          echo "Python sys.path:"
           python - << EOF
-          import sys, os
-          print("Python:", sys.version)
-          print("Files:", os.listdir("."))
+          import sys
+          from pprint import pprint
+          pprint(sys.path)
           EOF
 
-      - name: Build EXE with PyInstaller (stable config)
+      - name: Build GUI EXE with PyInstaller
+        env:
+          IMAGEIO_FFMPEG_EXE: ""
         run: |
           pyinstaller ^
             --onefile ^
             --noconsole ^
             --clean ^
+            --noupx ^
+            --runtime-tmpdir . ^
             --name sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e ^
             --collect-all cv2 ^
             --collect-all moviepy ^
             --collect-all librosa ^
             --collect-all scipy ^
             --collect-all soundfile ^
+            --collect-all imageio_ffmpeg ^
             --hidden-import=imageio_ffmpeg ^
             --hidden-import=scenedetect ^
             --hidden-import=scenedetect.detectors ^
             gui.py
 
-      - name: Verify build output
+      - name: Verify EXE output
         run: |
+          echo "Dist contents:"
           dir dist
 
       - name: Upload EXE artifact
@@ -74,9 +84,9 @@ jobs:
           name: sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-windows-exe
           path: dist/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e.exe
 
-      - name: Create GitHub Release (only for tags)
+      - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e.exe
