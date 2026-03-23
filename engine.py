@@ -1,380 +1,448 @@
+"""
+engine.py — Breakcore Engine
+Pipeline: cv2.VideoCapture → EffectChain → ffmpeg subprocess pipe → output file.
+Replaces MoviePy. All frame processing is numpy/cv2.
+"""
+
 import os
 import random
-import time
+import subprocess
 import numpy as np
-import librosa
 import cv2
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, List, Callable
 
-from moviepy.editor import (
-    VideoFileClip, AudioFileClip, concatenate_videoclips,
-    ImageClip, CompositeVideoClip, vfx, ColorClip
+from analyzer import AudioAnalyzer, Segment, SegmentType
+from effects import (
+    PixelSortEffect, DatamoshEffect, ASCIIEffect, FlashEffect,
+    GhostTrailsEffect, RGBShiftEffect, BlockGlitchEffect, PixelDriftEffect,
+    ScanLinesEffect, BitcrushEffect, ColorBleedEffect, FreezeCorruptEffect,
+    NegativeEffect, JPEGCrushEffect, FisheyeEffect, VHSTrackingEffect,
+    InterlaceEffect, BadSignalEffect, DitheringEffect, ZoomGlitchEffect,
+    FeedbackLoopEffect, PhaseShiftEffect, MosaicPulseEffect, EchoCompoundEffect,
+    KaliMirrorEffect, GlitchCascadeEffect, OverlayEffect, ChromaKeyEffect,
+    MysterySection,
 )
-from moviepy.video.fx.colorx import colorx
 
 from scenedetect import VideoManager, SceneManager
 from scenedetect.detectors import ContentDetector
 
-from PIL import Image
+RENDER_DRAFT = 'draft'
+RENDER_PREVIEW = 'preview'
+RENDER_FINAL = 'final'
 
-# --- КОНСТАНТЫ ---
-MIN_SEGMENT_DURATION = 0.04  # ~1 кадр при 24fps.
-DEFAULT_FPS = 24
 
-class GhostEffect:
-    """
-    Класс для реализации эффекта Ghost Trails (Шлейф).
-    Оптимизирован для использования float32.
-    """
-    def __init__(self, alpha: float = 0.5):
-        self.alpha = alpha
-        self.last_frame = None
+class VideoPool:
+    """Manages multiple VideoCapture objects; selects randomly per segment."""
 
-    def apply(self, get_frame, t):
-        current_frame = get_frame(t)
-        
-        # Если это первый кадр
-        if self.last_frame is None:
-            # Используем float32 для экономии памяти (в 2 раза меньше чем стандартный float64)
-            self.last_frame = current_frame.astype(np.float32)
-            return current_frame
+    def __init__(self, paths: List[str]):
+        if not paths:
+            raise ValueError("VideoPool requires at least one path")
+        self.paths = paths
+        self.caps: List[cv2.VideoCapture] = []
+        self.fps_list: List[float] = []
+        self.total_frames_list: List[int] = []
+        self.durations: List[float] = []
 
-        # Конвертируем текущий кадр
-        curr_float = current_frame.astype(np.float32)
-        
-        # Смешивание: New = Current * (1-alpha) + Old * alpha
-        # Используем cv2.addWeighted для скорости
-        blended = cv2.addWeighted(curr_float, 1.0, self.last_frame, self.alpha, 0)
-        
-        self.last_frame = blended # Обновляем "память"
-        
-        # Безопасная конвертация обратно в uint8
-        return cv2.convertScaleAbs(blended)
+        for path in paths:
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                raise RuntimeError(f"Cannot open video: {path}")
+            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.caps.append(cap)
+            self.fps_list.append(fps)
+            self.total_frames_list.append(total)
+            self.durations.append(total / fps)
+
+        # Expose primary-source properties for backward compat
+        self.vid_fps = self.fps_list[0]
+        self.vid_total_frames = self.total_frames_list[0]
+        self.vid_duration = max(self.durations)
+
+    def random_cap(self):
+        """Return (cap, fps, total_frames, duration) for a randomly selected source."""
+        i = random.randrange(len(self.caps))
+        return self.caps[i], self.fps_list[i], self.total_frames_list[i], self.durations[i]
+
+    def primary_cap(self):
+        """Return the first source's cap (used for datamosh)."""
+        return self.caps[0], self.fps_list[0], self.total_frames_list[0], self.durations[0]
+
+    def release_all(self):
+        for cap in self.caps:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
 
 class BreakcoreEngine:
-    def __init__(self, config: Dict[str, Any], progress_callback=None):
+    def __init__(self, config: Dict[str, Any], progress_callback: Optional[Callable] = None):
         self.cfg = config
         self.progress_callback = progress_callback
         self.abort = False
-        self.scene_cuts: List[float] = []      
-        self.scene_buffer: List[float] = []    
-        self.target_resolution = (1280, 720) # Значение по умолчанию, обновится при старте
-        
-        if not os.path.exists(self.cfg['video_path']):
-            raise FileNotFoundError(f"Video file not found: {self.cfg['video_path']}")
-        if not os.path.exists(self.cfg['audio_path']):
-            raise FileNotFoundError(f"Audio file not found: {self.cfg['audio_path']}")
+        self.scene_cuts: List[float] = []
 
     def log(self, message: str, value: Optional[int] = None):
         print(f"[ENGINE] {message}")
         if self.progress_callback:
             self.progress_callback(message, value)
 
-    # --- 1. АНАЛИЗ ВИДЕО ---
-    def detect_scenes(self, video_duration: float):
-        if not self.cfg.get('use_scene_detect', True):
-            self.log("Scene detection disabled by user.")
+    def detect_scenes(self, video_paths: List[str], duration: float):
+        if not self.cfg.get('use_scene_detect', False):
             return
+        self.log("Detecting scenes...")
+        all_scene_cuts: List[float] = []
+        for video_path in video_paths:
+            vm = VideoManager([video_path])
+            sm = SceneManager()
+            sm.add_detector(ContentDetector(threshold=30.0))
+            try:
+                vm.set_downscale_factor()
+                vm.start()
+                sm.detect_scenes(frame_source=vm)
+                scene_list = sm.get_scene_list()
+                cuts = [x[0].get_seconds() for x in scene_list
+                        if x[0].get_seconds() < duration - 1.0]
+                all_scene_cuts.extend(cuts)
+            except Exception as e:
+                self.log(f"Scene detection warning ({video_path}): {e}")
+            finally:
+                vm.release()
+        all_scene_cuts = sorted(set(all_scene_cuts))
+        buf = int(self.cfg.get('scene_buffer_size', 10))
+        self.scene_cuts = all_scene_cuts[:buf] if buf < len(all_scene_cuts) else all_scene_cuts
+        self.log(f"Found {len(all_scene_cuts)} scene cuts across {len(video_paths)} source(s), using {len(self.scene_cuts)}.")
 
-        self.log("Starting Smart Scene Detection...")
-        video_manager = VideoManager([self.cfg['video_path']])
-        scene_manager = SceneManager()
-        scene_manager.add_detector(ContentDetector(threshold=30.0))
-        
-        try:
-            video_manager.set_downscale_factor()
-            video_manager.start()
-            scene_manager.detect_scenes(frame_source=video_manager)
-            
-            scene_list = scene_manager.get_scene_list()
-            self.scene_cuts = [x[0].get_seconds() for x in scene_list]
-            self.scene_cuts = [t for t in self.scene_cuts if t < video_duration - 1.0]
-            
-            self.log(f"Detected {len(self.scene_cuts)} scenes.")
-            
-            buf_size = int(self.cfg.get('scene_buffer_size', 10))
-            self.scene_buffer = self.scene_cuts[:buf_size]
-            
-        except Exception as e:
-            self.log(f"Scene detection warning: {e}. Fallback to random seeking.")
-            self.scene_cuts = []
-        finally:
-            video_manager.release()
-
-    # --- 2. АНАЛИЗ АУДИО ---
-    def analyze_audio(self):
-        self.log("Computing audio features...")
-        y, sr = librosa.load(self.cfg['audio_path'])
-        
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, units='time', backtrack=True)
-        rms = librosa.feature.rms(y=y)[0]
-        flatness = librosa.feature.spectral_flatness(y=y)[0]
-        
-        return onsets, rms, flatness, sr, y.shape[0] / sr
-
-    # --- 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-    def get_time_index(self, t: float, sr: int, array_len: int, hop_length: int = 512) -> int:
-        frame = librosa.time_to_frames(t, sr=sr, hop_length=hop_length)
-        return min(frame, array_len - 1)
-
-    def get_source_clip(self, main_video: VideoFileClip, duration: float) -> VideoFileClip:
+    def _get_source_time(self, video_duration: float, seg_duration: float) -> float:
         chaos = self.cfg.get('chaos_level', 0.5)
-        use_scenes = len(self.scene_buffer) > 0
-        should_use_scene = use_scenes and (random.random() > chaos * 0.8)
-        
-        start_t = 0.0
-        if should_use_scene:
-            start_t = random.choice(self.scene_buffer)
-            start_t += random.uniform(0, 1.0)
+        if self.scene_cuts and random.random() > chaos * 0.8:
+            t = random.choice(self.scene_cuts) + random.uniform(0, 1.0)
         else:
-            start_t = random.uniform(0, max(0, main_video.duration - duration))
+            t = random.uniform(0, max(0, video_duration - seg_duration))
+        return max(0.0, min(t, video_duration - seg_duration - 0.1))
 
-        if start_t + duration > main_video.duration:
-            start_t = max(0, main_video.duration - duration - 0.1)
-            
-        return main_video.subclip(start_t, start_t + duration)
+    def _build_effects(self) -> List:
+        c = self.cfg
+        chaos = float(c.get('chaos_level', 0.5))
 
-    # --- 4. ЭФФЕКТЫ ---
-    def fx_pixel_sort(self, clip: VideoFileClip) -> VideoFileClip:
-        intensity = self.cfg.get('fx_psort_int', 0.5)
+        # Scale every effect's chance by chaos so the slider actually controls
+        # how aggressive the pipeline feels — matching the original engine where
+        # each effect used  random.random() < (base + chaos * boost).
+        # Formula: chaos=0 → 30 % of base chance; chaos=1 → 100 % of base chance.
+        def _ch(base: float) -> float:
+            return min(1.0, base * (0.3 + 0.7 * chaos))
 
-        def fl(gf, t):
-            frame = gf(t)
-            img_arr = frame.copy()
-            h, w, channels = img_arr.shape
-            
-            sort_h = int(h * (0.1 + intensity * 0.6))
-            y_start = random.randint(0, h - sort_h)
-            
-            crop = img_arr[y_start:y_start+sort_h, :, :]
-            pixels = crop.reshape(-1, channels)
-            lum = pixels[:, :3].sum(axis=1)
-            sorted_indices = np.argsort(lum)
-            
-            sorted_pixels = pixels[sorted_indices]
-            sorted_crop = sorted_pixels.reshape(sort_h, w, channels)
-            img_arr[y_start:y_start+sort_h, :, :] = sorted_crop
-            return img_arr
+        chain = []
+        if c.get('fx_rgb'):          chain.append(RGBShiftEffect(enabled=True, chance=_ch(c.get('fx_rgb_chance', 0.7))))
+        if c.get('fx_psort'):        chain.append(PixelSortEffect(enabled=True, chance=_ch(c.get('fx_psort_chance', 0.5)), sort_axis=c.get('fx_psort_axis', 'luminance'), intensity_min=0.0, intensity_max=c.get('fx_psort_int', 0.5)))
+        if c.get('fx_block_glitch'): chain.append(BlockGlitchEffect(enabled=True, chance=_ch(c.get('fx_block_glitch_chance', 0.5))))
+        if c.get('fx_pixel_drift'):  chain.append(PixelDriftEffect(enabled=True, chance=_ch(c.get('fx_pixel_drift_chance', 0.5))))
+        if c.get('fx_scanlines'):    chain.append(ScanLinesEffect(enabled=True, chance=_ch(c.get('fx_scanlines_chance', 0.8))))
+        if c.get('fx_bitcrush'):     chain.append(BitcrushEffect(enabled=True, chance=_ch(c.get('fx_bitcrush_chance', 0.5))))
+        if c.get('fx_colorbleed'):   chain.append(ColorBleedEffect(enabled=True, chance=_ch(c.get('fx_colorbleed_chance', 0.5))))
+        if c.get('fx_freeze_corrupt'): chain.append(FreezeCorruptEffect(enabled=True, chance=_ch(c.get('fx_freeze_corrupt_chance', 0.3))))
+        if c.get('fx_negative'):     chain.append(NegativeEffect(enabled=True, chance=_ch(c.get('fx_negative_chance', 0.2))))
+        if c.get('fx_jpeg_crush'):   chain.append(JPEGCrushEffect(enabled=True, chance=_ch(c.get('fx_jpeg_crush_chance', 0.5))))
+        if c.get('fx_fisheye'):      chain.append(FisheyeEffect(enabled=True, chance=_ch(c.get('fx_fisheye_chance', 0.3))))
+        if c.get('fx_vhs'):          chain.append(VHSTrackingEffect(enabled=True, chance=_ch(c.get('fx_vhs_chance', 0.5))))
+        if c.get('fx_interlace'):    chain.append(InterlaceEffect(enabled=True, chance=_ch(c.get('fx_interlace_chance', 0.4))))
+        if c.get('fx_bad_signal'):   chain.append(BadSignalEffect(enabled=True, chance=_ch(c.get('fx_bad_signal_chance', 0.3))))
+        if c.get('fx_dither'):       chain.append(DitheringEffect(enabled=True, chance=_ch(c.get('fx_dither_chance', 0.4))))
+        if c.get('fx_zoom_glitch'):  chain.append(ZoomGlitchEffect(enabled=True, chance=_ch(c.get('fx_zoom_glitch_chance', 0.5))))
+        if c.get('fx_feedback'):     chain.append(FeedbackLoopEffect(enabled=True, chance=1.0))
+        if c.get('fx_phase_shift'):  chain.append(PhaseShiftEffect(enabled=True, chance=_ch(c.get('fx_phase_shift_chance', 0.4))))
+        if c.get('fx_mosaic'):       chain.append(MosaicPulseEffect(enabled=True, chance=_ch(c.get('fx_mosaic_chance', 0.5))))
+        if c.get('fx_echo'):         chain.append(EchoCompoundEffect(enabled=True, chance=_ch(c.get('fx_echo_chance', 0.4))))
+        if c.get('fx_kali'):         chain.append(KaliMirrorEffect(enabled=True, chance=_ch(c.get('fx_kali_chance', 0.3))))
+        if c.get('fx_cascade'):      chain.append(GlitchCascadeEffect(enabled=True, chance=_ch(c.get('fx_cascade_chance', 0.4))))
+        if c.get('fx_ghost'):        chain.append(GhostTrailsEffect(enabled=True, chance=1.0, intensity_max=c.get('fx_ghost_int', 0.5)))
+        if c.get('fx_overlay') and c.get('overlay_dir'):
+            overlay_frames = self._load_overlay_frames(c['overlay_dir'])
+            if overlay_frames:
+                chain.append(OverlayEffect(
+                    enabled=True,
+                    chance=_ch(c.get('fx_overlay_chance', 0.2)),
+                    overlay_frames=overlay_frames,
+                    opacity=c.get('fx_overlay_opacity', 0.85),
+                    blend_mode=c.get('fx_overlay_blend', 'screen'),
+                    scale=c.get('fx_overlay_scale', 0.4),
+                    scale_min=c.get('fx_overlay_scale_min', 0.15),
+                    position=c.get('fx_overlay_position', 'random'),
+                ))
+            else:
+                self.log(f"WARNING: No images found in overlay folder: {c['overlay_dir']}")
+        if c.get('fx_datamosh'): chain.append(DatamoshEffect(enabled=True, chance=_ch(c.get('fx_datamosh_chance', 0.5))))
+        if c.get('fx_ascii'):    chain.append(ASCIIEffect(enabled=True, chance=_ch(c.get('fx_ascii_chance', 0.5)), char_size=c.get('fx_ascii_size', 10), fg_color=tuple(c.get('fx_ascii_fg', [0, 255, 0])), bg_color=tuple(c.get('fx_ascii_bg', [0, 0, 0])), blend=c.get('fx_ascii_blend', 0.0), color_mode=c.get('fx_ascii_color_mode', 'fixed')))
+        return chain
 
-        return clip.fl(fl)
-
-    def fx_stutter(self, clip: VideoFileClip, count: int) -> VideoFileClip:
-        if clip.duration < MIN_SEGMENT_DURATION:
-            return clip
-            
-        segment_len = clip.duration / count
-        if segment_len < MIN_SEGMENT_DURATION:
-            segment_len = MIN_SEGMENT_DURATION
-            count = int(clip.duration / segment_len)
-            if count < 1: count = 1
-
-        sub = clip.subclip(0, segment_len)
-        # ВАЖНО: При stutter также используем chain или просто склейку
-        stuttered = concatenate_videoclips([sub] * count)
-        
-        if stuttered.duration > clip.duration:
-            stuttered = stuttered.subclip(0, clip.duration)
-        return stuttered
-
-    def fx_ghost_trails(self, clip: VideoFileClip) -> VideoFileClip:
-        opacity = self.cfg.get('fx_ghost_opacity', 0.5)
-        effect = GhostEffect(alpha=opacity)
-        return clip.fl(effect.apply)
-
-    def fx_flash(self, duration: float) -> VideoFileClip:
-        col = 'white' if random.random() > 0.5 else 'black'
-        # Создаем клип сразу нужного размера, чтобы не ресайзить лишний раз
-        return ColorClip(size=self.target_resolution, color=col, duration=duration).set_opacity(0.8)
-
-    # --- 5. ГЛАВНЫЙ ЦИКЛ (RUN) ---
-    def run(self, max_output_duration: Optional[float] = None):
+    def _load_overlay_frames(self, folder: str) -> List[np.ndarray]:
+        """Load all PNG/JPG images from folder as RGB numpy arrays."""
+        from PIL import Image as PILImage
+        exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+        frames = []
         try:
-            self.log("Initializing media...")
-            main_audio = AudioFileClip(self.cfg['audio_path'])
-            main_video = VideoFileClip(self.cfg['video_path'])
-            
-            # --- Четкая фиксация разрешения ---
-            w, h = main_video.size
-            if w > 1920: 
-                main_video = main_video.resize(width=1920)
-            
-            # Сохраняем целевое разрешение в атрибут класса
-            self.target_resolution = main_video.size
-            self.log(f"Target resolution locked at: {self.target_resolution}")
+            entries = sorted(os.listdir(folder))
+        except OSError:
+            return frames
+        for name in entries:
+            if os.path.splitext(name)[1].lower() in exts:
+                path = os.path.join(folder, name)
+                try:
+                    img = PILImage.open(path).convert('RGB')
+                    frames.append(np.array(img))
+                except Exception:
+                    pass
+        return frames
 
-            overlay_files = []
-            if self.cfg.get('overlay_dir') and os.path.exists(self.cfg['overlay_dir']):
-                valid_ext = ('.png', '.jpg', '.jpeg')
-                overlay_files = [
-                    os.path.join(self.cfg['overlay_dir'], f) 
-                    for f in os.listdir(self.cfg['overlay_dir']) 
-                    if f.lower().endswith(valid_ext)
-                ]
+    def _prepare_datamosh_source(self, video_path: str, output_path: str) -> bool:
+        """
+        Create a P-frame-only version of the source video for datamosh.
+        Returns True if successful.
+        ffmpeg removes keyframes to make motion vectors bleed across scene cuts.
+        """
+        cmd = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-vf', "select=not(eq(pict_type\,I))",
+            '-vsync', 'vfr',
+            '-vcodec', 'libx264',
+            '-x264opts', 'keyint=1000:no-scenecut',
+            '-preset', 'ultrafast',
+            output_path
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            self.log(f"Datamosh ffmpeg error: {result.stderr[:200].decode(errors='replace')}")
+        return result.returncode == 0
 
-            self.detect_scenes(main_video.duration)
-            onsets, rms, flat, sr, audio_dur = self.analyze_audio()
+    def run(self, render_mode: str = RENDER_FINAL, max_output_duration: Optional[float] = None):
+        raw_paths = self.cfg.get('video_paths') or self.cfg.get('video_path')
+        video_paths = raw_paths if isinstance(raw_paths, list) else [raw_paths]
+        audio_path = self.cfg['audio_path']
+        output_path = self.cfg['output_path']
 
-            target_duration = audio_dur
-            if max_output_duration:
-                target_duration = min(audio_dur, max_output_duration)
-                onsets = [t for t in onsets if t < target_duration]
-                if onsets[-1] < target_duration:
-                    onsets.append(target_duration)
+        is_draft = render_mode == RENDER_DRAFT
+        is_final = render_mode == RENDER_FINAL
 
-            rms_mean = np.mean(rms)
-            flat_mean = np.mean(flat)
-            hop_len = 512
+        if is_draft:
+            out_w, out_h = 480, 270
+            fps = 24
+            preset = 'ultrafast'
+            crf = 28
+        else:
+            res_map = {'240p': (426,240), '360p': (640,360), '480p': (854,480),
+                       '720p': (1280,720), '1080p': (1920,1080)}
+            res_key = self.cfg.get('resolution', '720p')
+            out_w, out_h = res_map.get(res_key, (1280, 720))
+            fps = int(self.cfg.get('fps', 24))
+            preset = self.cfg.get('export_preset', 'medium')
+            crf = int(self.cfg.get('crf', 18))
 
-            final_clips = []
-            self.log(f"Generating montage from {len(onsets)-1} segments...")
+        self.log(f"Mode: {render_mode} | {out_w}x{out_h} @ {fps}fps | preset={preset} crf={crf}")
 
-            # --- ЦИКЛ ПО СЕГМЕНТАМ ---
-            for i in range(len(onsets) - 1):
+        self.log("Analyzing audio...")
+        analyzer = AudioAnalyzer(
+            audio_path,
+            min_segment_dur=self.cfg.get('min_cut_duration', 0.05),
+            loud_thresh=float(self.cfg.get('threshold', 1.2)),
+            transient_thresh=float(self.cfg.get('transient_thresh', 0.5)),
+            snap_to_beat=bool(self.cfg.get('snap_to_beat', False)),
+            snap_tolerance=float(self.cfg.get('snap_tolerance', 0.05)),
+        )
+        segments, audio_duration = analyzer.analyze()
+
+        if audio_duration == 0.0 or not segments:
+            self.log("Warning: audio unreadable or produced no segments — output will have no effects.")
+
+        target_duration = audio_duration
+        if max_output_duration:
+            target_duration = min(audio_duration, max_output_duration)
+            segments = [s for s in segments if s.t_start < target_duration]
+
+        bpm_str = f" | {analyzer.detected_bpm:.1f} BPM" if analyzer.detected_bpm else ""
+        self.log(f"Audio: {audio_duration:.1f}s | Segments: {len(segments)}{bpm_str}")
+
+        pool = VideoPool(video_paths)
+        vid_duration = pool.vid_duration
+        self.detect_scenes(video_paths, vid_duration)
+
+        effects = self._build_effects()
+        mystery = MysterySection()
+        mystery_cfg = self.cfg.get('mystery', {})
+        for k, v in mystery_cfg.items():
+            if hasattr(mystery, k):
+                try:
+                    setattr(mystery, k, float(v))
+                except (TypeError, ValueError):
+                    pass
+
+        chaos = float(self.cfg.get('chaos_level', 0.5))
+
+        flash_enabled = self.cfg.get('fx_flash', False)
+        # Flash and stutter chances scale with chaos (original engine behaviour)
+        flash_chance  = min(1.0, self.cfg.get('fx_flash_chance', 0.5) * (0.3 + 0.7 * chaos))
+        flash_fx = FlashEffect(enabled=True, chance=1.0)
+
+        stutter_enabled = self.cfg.get('fx_stutter', False)
+
+        # H.265 support — fmt_combo in GUI now wired up
+        use_h265 = 'H.265' in self.cfg.get('video_codec', 'H.264')
+        vcodec = 'libx265' if use_h265 else 'libx264'
+        # x265 needs a different movflags tag; also add -tag:v hvc1 for Apple compat
+        extra_flags = ['-tag:v', 'hvc1'] if use_h265 else []
+
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-s', f'{out_w}x{out_h}',
+            '-pix_fmt', 'rgb24',
+            '-r', str(fps),
+            '-i', 'pipe:0',
+            '-i', audio_path,
+            '-vcodec', vcodec,
+            '-pix_fmt', 'yuv420p',
+            '-preset', preset,
+            '-crf', str(crf),
+            *extra_flags,
+            '-acodec', 'aac',
+            '-t', str(target_duration),
+            '-shortest',
+            '-movflags', '+faststart',
+            output_path
+        ]
+
+        self.log("Starting ffmpeg pipe...")
+        proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+
+        # Drain ffmpeg stderr in background so its pipe buffer never fills up
+        import threading as _threading
+        def _drain(pipe):
+            try:
+                pipe.read()
+            except Exception:
+                pass
+        _threading.Thread(target=_drain, args=(proc.stderr,), daemon=True).start()
+
+        vid_fps = pool.vid_fps
+        vid_total_frames = pool.vid_total_frames
+
+        # --- Real datamosh: pre-process source to P-frames only (final mode) ---
+        datamosh_source_path = None
+        datamosh_cap = None
+        datamosh_total_frames = vid_total_frames
+        if is_final and self.cfg.get('fx_datamosh'):
+            dm_path = output_path + '_dmosh_src.mp4'
+            self.log("Preparing datamosh source (I-frame drop)...")
+            if self._prepare_datamosh_source(video_paths[0], dm_path):
+                datamosh_source_path = dm_path
+                datamosh_cap = cv2.VideoCapture(dm_path)
+                datamosh_total_frames = int(datamosh_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                self.log("Datamosh source ready.")
+            else:
+                self.log("Datamosh pre-processing failed, falling back to optical flow.")
+
+        try:
+            for seg_idx, seg in enumerate(segments):
                 if self.abort:
-                    self.log("Render aborted.")
                     break
 
-                t_start = onsets[i]
-                t_end = onsets[i+1]
-                dur = t_end - t_start
+                seg_dur = min(seg.duration, target_duration - seg.t_start)
+                if seg_dur <= 0:
+                    break
 
-                if dur < self.cfg.get('min_cut_duration', 0.05):
-                    continue
+                n_frames = max(1, int(seg_dur * fps))
 
-                idx = self.get_time_index(t_start, sr, len(rms), hop_len)
-                curr_rms = rms[idx]
-                curr_flat = flat[idx]
-                
-                rms_change = 0
-                if idx > 5:
-                    prev_rms = rms[idx - 5]
-                    rms_change = curr_rms - prev_rms
+                # Pick a random source video for this segment
+                seg_cap, seg_fps, seg_total_frames, seg_duration = pool.random_cap()
 
-                beat_thresh = self.cfg.get('threshold', 1.2)
-                is_loud = curr_rms > (rms_mean * beat_thresh)
-                is_noisy = curr_flat > (flat_mean * 1.5)
-                is_transient = rms_change > (rms_mean * 0.5)
-                chaos = self.cfg.get('chaos_level', 0.5)
-                
-                segment_parts = []
-                
-                # 1. FLASH
-                flash_active = False
-                if self.cfg.get('fx_flash') and is_transient and random.random() < self.cfg.get('fx_flash_chance', 0.5):
-                    flash_dur = MIN_SEGMENT_DURATION * 2
-                    if dur > flash_dur * 2:
-                        # fx_flash теперь использует self.target_resolution внутри
-                        f_clip = self.fx_flash(flash_dur)
-                        segment_parts.append(f_clip)
-                        dur -= flash_dur
-                        flash_active = True
+                use_datamosh_src = (
+                    is_final and
+                    datamosh_cap is not None and
+                    seg.type == SegmentType.NOISE and
+                    self.cfg.get('fx_datamosh') and
+                    random.random() < self.cfg.get('fx_datamosh_chance', 0.5)
+                )
+                active_cap = datamosh_cap if use_datamosh_src else seg_cap
+                active_total_frames = datamosh_total_frames if use_datamosh_src else seg_total_frames
 
-                # 2. SOURCE CLIP
-                # Сразу ресайзим к целевому разрешению
-                clip = self.get_source_clip(main_video, dur).resize(newsize=self.target_resolution)
+                src_t = self._get_source_time(seg_duration, seg_dur)
+                src_frame_idx = int(src_t * seg_fps)
+                active_cap.set(cv2.CAP_PROP_POS_FRAMES, min(src_frame_idx, active_total_frames - 1))
 
-                # 3. EFFECTS
-                if self.cfg.get('fx_stutter') and is_loud and dur < 0.3:
-                    if random.random() < (0.3 + chaos * 0.5):
-                        repeats = random.choice([2, 4, 8])
-                        clip = self.fx_stutter(clip, repeats)
+                stutter_repeat = 1
+                if stutter_enabled and seg.type == SegmentType.IMPACT and seg.duration < 0.3:
+                    if random.random() < (0.3 + self.cfg.get('chaos_level', 0.5) * 0.5):
+                        stutter_repeat = random.choice([2, 4, 8])
 
-                elif self.cfg.get('fx_psort') and is_noisy:
-                    if random.random() < self.cfg.get('fx_psort_chance', 0.5):
-                        clip = self.fx_pixel_sort(clip)
+                if flash_enabled and seg.type in (SegmentType.DROP, SegmentType.IMPACT):
+                    if random.random() < flash_chance:
+                        flash_frames = random.randint(1, 2)
+                        dummy_frame = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+                        flash_frame = flash_fx._apply(dummy_frame, seg, is_draft)
+                        flash_frame = cv2.resize(flash_frame, (out_w, out_h))
+                        for _ in range(flash_frames):
+                            proc.stdin.write(flash_frame.tobytes())
 
-                if self.cfg.get('fx_ghost') and is_loud:
-                      clip = self.fx_ghost_trails(clip)
+                frames_written = 0
+                while frames_written < n_frames:
+                    ret, frame_bgr = active_cap.read()
+                    if not ret:
+                        active_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame_bgr = active_cap.read()
+                        if not ret:
+                            break
 
-                if not is_loud and not is_noisy and dur > 1.0:
-                    clip = clip.fx(colorx, 0.6)
+                    frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    frame = cv2.resize(frame, (out_w, out_h))
 
-                segment_parts.append(clip)
-                
-                # Сборка частей сегмента (Flash + Clip)
-                # Поскольку мы гарантировали размер, здесь все ок
-                full_segment = concatenate_videoclips(segment_parts)
+                    # Silence treatment for long silent segments
+                    if seg.type == SegmentType.SILENCE and seg.duration > 1.0:
+                        _smode = self.cfg.get('silence_mode', 'dim')
+                        if _smode == 'dim':
+                            frame = (frame.astype(np.float32) * 0.6).clip(0, 255).astype(np.uint8)
+                        elif _smode == 'blur':
+                            frame = cv2.GaussianBlur(frame, (15, 15), 0)
+                        elif _smode == 'both':
+                            frame = cv2.GaussianBlur(frame, (11, 11), 0)
+                            frame = (frame.astype(np.float32) * 0.7).clip(0, 255).astype(np.uint8)
+                        # 'none': no treatment
 
-                # 4. OVERLAYS
-                if overlay_files and self.cfg.get('fx_overlay'):
-                    if random.random() < (0.15 + chaos * 0.2):
-                        ov_path = random.choice(overlay_files)
+                    for fx in effects:
                         try:
-                            img = Image.open(ov_path).convert("RGBA")
-                            # Логика ресайза оверлея
-                            max_h_target = self.target_resolution[1] // 2
-                            if img.height > max_h_target * 1.5:
-                                ratio = max_h_target * 1.5 / img.height
-                                new_size = (int(img.width * ratio), int(img.height * ratio))
-                                img = img.resize(new_size, Image.Resampling.LANCZOS)
-                            
-                            ov_clip = ImageClip(np.array(img)).set_duration(full_segment.duration)
-                            
-                            max_h = self.target_resolution[1] // 2
-                            # Рандомный ресайз
-                            ov_clip = ov_clip.resize(height=random.randint(max_h // 2, max_h))
-                            
-                            pos_x = random.randint(0, self.target_resolution[0] - ov_clip.w)
-                            pos_y = random.randint(0, self.target_resolution[1] - ov_clip.h)
-                            
-                            # ВАЖНО: Явно указываем size при композитинге
-                            full_segment = CompositeVideoClip(
-                                [full_segment, ov_clip.set_position((pos_x, pos_y))],
-                                size=self.target_resolution
-                            )
-                        except Exception as e:
-                            self.log(f"Overlay warning: {e}") 
-                            pass
+                            frame = fx.apply(frame, seg, is_draft)
+                        except Exception as _fx_err:
+                            self.log(f"Effect error ({type(fx).__name__}): {_fx_err}")
+                    try:
+                        frame = mystery.apply(frame, seg, is_draft)
+                    except Exception as _m_err:
+                        self.log(f"Mystery error: {_m_err}")
 
-                # Финальная гарантия размера перед добавлением в общий список.
-                # Если какой-то эффект сдвинул размер на 1 пиксель, это исправит ситуацию.
-                if full_segment.size != self.target_resolution:
-                     full_segment = full_segment.resize(newsize=self.target_resolution)
-
-                final_clips.append(full_segment)
+                    frame_bytes = frame.tobytes()
+                    for _ in range(stutter_repeat):
+                        proc.stdin.write(frame_bytes)
+                        frames_written += 1
+                        if frames_written >= n_frames:
+                            break
 
                 if self.progress_callback:
-                    pct = int((i / len(onsets)) * 100)
-                    self.progress_callback(f"Processing... {pct}%", pct)
+                    pct = int((seg_idx / len(segments)) * 100)
+                    self.progress_callback(f"Rendering... {pct}%", pct)
 
-            # --- ФИНАЛЬНЫЙ РЕНДЕР ---
-            self.log("Concatenating all segments...")
-            if not final_clips:
-                self.log("Error: No clips generated.")
-                return
+        except (BrokenPipeError, OSError):
+            self.log("ffmpeg pipe closed early.")
+        finally:
+            pool.release_all()
+            if datamosh_cap:
+                datamosh_cap.release()
+            if datamosh_source_path and os.path.exists(datamosh_source_path):
+                os.remove(datamosh_source_path)
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            proc.wait()
 
-            final_video = concatenate_videoclips(final_clips, method="chain")
-            
-            if final_video.duration > target_duration:
-                final_video = final_video.subclip(0, target_duration)
-            
-            audio_sub = main_audio.subclip(0, target_duration)
-            final_video = final_video.set_audio(audio_sub)
+        if not self.abort:
+            self.log(f"Done. Output: {output_path}")
 
-            self.log(f"Writing to disk: {self.cfg['output_path']}")
-            
-            final_video.write_videofile(
-                self.cfg['output_path'],
-                fps=DEFAULT_FPS,
-                codec='libx264',
-                audio_codec='aac',
-                preset='medium',
-                threads=4,
-                logger=None
-            )
-
-            self.log("DONE! Video saved.")
-            
-            main_audio.close()
-            main_video.close()
-            final_video.close()
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self.log(f"CRITICAL ERROR: {str(e)}")
-            raise e
-
-if __name__ == "__main__":
-    print("This module is part of the Breakcore Engine and should be run via GUI.")

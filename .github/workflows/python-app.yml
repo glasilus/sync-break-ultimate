@@ -1,99 +1,270 @@
-name: Build Windows EXE 
+name: Build & Release
 
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     tags:
       - "v*"
 
 permissions:
   contents: write
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared PyInstaller flags (written once, reused via env)
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  PY_VERSION: "3.10"
+
 jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. Windows  (priority)
+  # ───────────────────────────────────────────────────────────────────────────
   build-windows:
-    name: Build EXE (Windows)
+    name: Build — Windows
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python ${{ env.PY_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ env.PY_VERSION }}
 
-      - name: Verify Python environment
+      - name: Upgrade pip & install dependencies
         run: |
-          python --version
-          pip --version
-
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      - name: Install project dependencies
-        run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller weasyprint markdown
 
-      - name: Install PyInstaller
-        run: |
-          pip install pyinstaller
-
-      - name: Debug project structure
-        shell: bash
-        run: |
-          echo "Root directory:"
-          ls -la
-          echo "Python sys.path:"
-          python - << 'EOF'
-          import sys
-          from pprint import pprint
-          pprint(sys.path)
-          EOF
-
-      - name: Build GUI EXE with PyInstaller
+      # ── Build: Disc VPC 01 (main editor) ───────────────────────────────────
+      - name: Build DiscVPC01.exe
         shell: cmd
-        env:
-          IMAGEIO_FFMPEG_EXE:
         run: |
           pyinstaller ^
-            --onefile ^
-            --noconsole ^
-            --clean ^
-            --noupx ^
-            --name sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e ^
+            --onefile --noconsole --clean --noupx ^
+            --name DiscVPC01 ^
+            --add-data "presets.json;." ^
             --collect-all cv2 ^
-            --collect-all moviepy ^
             --collect-all librosa ^
             --collect-all scipy ^
             --collect-all soundfile ^
             --collect-all imageio_ffmpeg ^
-            --copy-metadata imageio ^
-            --copy-metadata moviepy ^
-            --collect-submodules moviepy ^
+            --collect-all numba ^
+            --collect-all llvmlite ^
+            --collect-all scenedetect ^
+            --collect-all opensimplex ^
+            --collect-all madmom ^
+            --collect-all av ^
+            --hidden-import=scenedetect.detectors ^
             --hidden-import=imageio ^
             --hidden-import=imageio_ffmpeg ^
-            --hidden-import=scenedetect ^
-            --hidden-import=scenedetect.detectors ^
+            --copy-metadata imageio ^
             gui.py
 
-      - name: Verify EXE output
+      # ── Build: Disc VPC 01 R-T (real-time) ─────────────────────────────────
+      - name: Build DiscVPC01-RT.exe
+        shell: cmd
         run: |
-          echo "Dist contents:"
-          dir dist
+          pyinstaller ^
+            --onefile --noconsole --clean --noupx ^
+            --name DiscVPC01-RT ^
+            --collect-all cv2 ^
+            --collect-all scipy ^
+            --collect-all soundfile ^
+            --collect-all opensimplex ^
+            --collect-all librosa ^
+            --collect-all numba ^
+            --collect-all llvmlite ^
+            --hidden-import=sounddevice ^
+            rt.py
 
-      - name: Upload EXE artifact
+      # ── README → PDF (EN + RU) ──────────────────────────────────────────────
+      - name: Convert README files to PDF
+        shell: python
+        run: |
+          import markdown, pathlib
+          from weasyprint import HTML
+
+          CSS_STYLE = """
+            body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+            h1, h2, h3 { color: #111; }
+            code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+            pre  { background: #f4f4f4; padding: 12px; border-radius: 4px; overflow-x: auto; }
+          """
+
+          def md_to_pdf(src: str, dst: str):
+              md_text = pathlib.Path(src).read_text(encoding="utf-8")
+              html_body = markdown.markdown(md_text, extensions=["tables", "fenced_code"])
+              html_full = (
+                  f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+                  f'<style>{CSS_STYLE}</style></head>'
+                  f'<body>{html_body}</body></html>'
+              )
+              HTML(string=html_full).write_pdf(dst)
+              print(f"{dst} written")
+
+          md_to_pdf("README.MD",    "README.pdf")
+          md_to_pdf("README_RU.MD", "README_RU.pdf")
+
+      # ── Bundle ZIP ──────────────────────────────────────────────────────────
+      - name: Create bundle ZIP
+        shell: pwsh
+        run: |
+          $dir = "Disc-VPC-01-windows"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item dist\DiscVPC01.exe    $dir\
+          Copy-Item dist\DiscVPC01-RT.exe $dir\
+          Copy-Item README.pdf            $dir\
+          Copy-Item README_RU.pdf         $dir\
+          Compress-Archive -Path $dir -DestinationPath Disc-VPC-01-windows.zip
+
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e-windows-exe
-          path: dist/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e.exe
+          name: Disc-VPC-01-windows
+          path: Disc-VPC-01-windows.zip
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. macOS  (best-effort)
+  # ───────────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build — macOS
+    runs-on: macos-latest
+    continue-on-error: true   # macOS is secondary; don't fail the whole run
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew install python-tk@${{ env.PY_VERSION }} portaudio
+          echo "$(brew --prefix python-tk@${{ env.PY_VERSION }})/lib/python${{ env.PY_VERSION }}/site-packages" >> $GITHUB_PATH
+
+      - name: Set up Python ${{ env.PY_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller weasyprint markdown
+
+      - name: Build DiscVPC01 (macOS app)
+        run: |
+          pyinstaller \
+            --onefile --noconsole --clean --noupx \
+            --name DiscVPC01 \
+            --add-data "presets.json:." \
+            --collect-all cv2 \
+            --collect-all librosa \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all imageio_ffmpeg \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --collect-all scenedetect \
+            --collect-all opensimplex \
+            --collect-all madmom \
+            --collect-all av \
+            --hidden-import=scenedetect.detectors \
+            --hidden-import=imageio \
+            --hidden-import=imageio_ffmpeg \
+            --copy-metadata imageio \
+            gui.py
+
+      - name: Build DiscVPC01-RT (macOS app)
+        run: |
+          pyinstaller \
+            --onefile --noconsole --clean --noupx \
+            --name DiscVPC01-RT \
+            --collect-all cv2 \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all opensimplex \
+            --collect-all librosa \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --hidden-import=sounddevice \
+            rt.py
+
+      - name: Convert README files to PDF
+        shell: python
+        run: |
+          import markdown, pathlib
+          from weasyprint import HTML
+
+          CSS_STYLE = """
+            body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+            h1, h2, h3 { color: #111; }
+            code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+            pre  { background: #f4f4f4; padding: 12px; border-radius: 4px; }
+          """
+
+          def md_to_pdf(src, dst):
+              md_text = pathlib.Path(src).read_text(encoding="utf-8")
+              html_body = markdown.markdown(md_text, extensions=["tables", "fenced_code"])
+              html_full = (
+                  f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+                  f'<style>{CSS_STYLE}</style></head>'
+                  f'<body>{html_body}</body></html>'
+              )
+              HTML(string=html_full).write_pdf(dst)
+
+          md_to_pdf("README.MD",    "README.pdf")
+          md_to_pdf("README_RU.MD", "README_RU.pdf")
+
+      - name: Create bundle ZIP
+        run: |
+          mkdir Disc-VPC-01-macos
+          cp dist/DiscVPC01    Disc-VPC-01-macos/
+          cp dist/DiscVPC01-RT Disc-VPC-01-macos/
+          cp README.pdf        Disc-VPC-01-macos/
+          cp README_RU.pdf     Disc-VPC-01-macos/
+          zip -r Disc-VPC-01-macos.zip Disc-VPC-01-macos/
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Disc-VPC-01-macos
+          path: Disc-VPC-01-macos.zip
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. GitHub Release  (only on version tag)
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download Windows bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: Disc-VPC-01-windows
+          path: dist-artifacts
+
+      # macOS artifact may be absent if that job failed (continue-on-error)
+      - name: Download macOS bundle (if available)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: Disc-VPC-01-macos
+          path: dist-artifacts
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/sYnC-B_r_E_a_K_u_L_t_i_M_a_T_e.exe
+          name: "Disc VPC 01 — ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          files: dist-artifacts/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
