@@ -10,9 +10,6 @@ on:
 permissions:
   contents: write
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Shared PyInstaller flags (written once, reused via env)
-# ─────────────────────────────────────────────────────────────────────────────
 env:
   PY_VERSION: "3.10"
 
@@ -76,23 +73,15 @@ jobs:
             --hidden-import=sounddevice ^
             rt.py
 
-      # ── Bundle ZIP ──────────────────────────────────────────────────────────
-      - name: Create bundle ZIP
-        shell: pwsh
-        run: |
-          $dir = "Disc-VPC-01-windows"
-          New-Item -ItemType Directory -Path $dir | Out-Null
-          Copy-Item dist\DiscVPC01.exe    $dir\
-          Copy-Item dist\DiscVPC01-RT.exe $dir\
-          Copy-Item README.MD             $dir\
-          Copy-Item README_RU.MD          $dir\
-          Compress-Archive -Path $dir -DestinationPath Disc-VPC-01-windows.zip
-
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: Disc-VPC-01-windows
-          path: Disc-VPC-01-windows.zip
+          path: |
+            dist/DiscVPC01.exe
+            dist/DiscVPC01-RT.exe
+            README.MD
+            README_RU.MD
 
   # ───────────────────────────────────────────────────────────────────────────
   # 2. macOS  (best-effort)
@@ -154,20 +143,15 @@ jobs:
             --hidden-import=sounddevice \
             rt.py
 
-      - name: Create bundle ZIP
-        run: |
-          mkdir Disc-VPC-01-macos
-          cp dist/DiscVPC01    Disc-VPC-01-macos/
-          cp dist/DiscVPC01-RT Disc-VPC-01-macos/
-          cp README.MD         Disc-VPC-01-macos/
-          cp README_RU.MD      Disc-VPC-01-macos/
-          zip -r Disc-VPC-01-macos.zip Disc-VPC-01-macos/
-
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: Disc-VPC-01-macos
-          path: Disc-VPC-01-macos.zip
+          path: |
+            dist/DiscVPC01
+            dist/DiscVPC01-RT
+            README.MD
+            README_RU.MD
 
   # ───────────────────────────────────────────────────────────────────────────
   # 3. GitHub Release  (only on version tag)
@@ -179,19 +163,27 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
-      - name: Download Windows bundle
+      - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
           name: Disc-VPC-01-windows
-          path: dist-artifacts
+          path: windows-files
 
       # macOS artifact may be absent if that job failed (continue-on-error)
-      - name: Download macOS bundle (if available)
+      - name: Download macOS artifact (if available)
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           name: Disc-VPC-01-macos
-          path: dist-artifacts
+          path: macos-files
+
+      - name: Create release ZIPs
+        run: |
+          cd windows-files && zip -r ../Disc-VPC-01-windows.zip . && cd ..
+          if [ -d macos-files ]; then
+            cd macos-files && chmod +x DiscVPC01 DiscVPC01-RT 2>/dev/null || true
+            zip -r ../Disc-VPC-01-macos.zip . && cd ..
+          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -199,6 +191,6 @@ jobs:
           name: "Disc VPC 01 — ${{ github.ref_name }}"
           draft: false
           prerelease: false
-          files: dist-artifacts/*.zip
+          files: Disc-VPC-01-*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
