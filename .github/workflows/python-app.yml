@@ -57,8 +57,6 @@ jobs:
             --collect-all llvmlite ^
             --collect-all scenedetect ^
             --collect-all opensimplex ^
-            --collect-all madmom ^
-            --collect-all av ^
             --hidden-import=scenedetect.detectors ^
             --hidden-import=imageio ^
             --hidden-import=imageio_ffmpeg ^
@@ -171,8 +169,6 @@ jobs:
             --collect-all llvmlite \
             --collect-all scenedetect \
             --collect-all opensimplex \
-            --collect-all madmom \
-            --collect-all av \
             --hidden-import=scenedetect.detectors \
             --hidden-import=imageio \
             --hidden-import=imageio_ffmpeg \
