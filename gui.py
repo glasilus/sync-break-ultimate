@@ -958,7 +958,7 @@ class MainGUI(tk.Tk):
     def sel_video(self):
         paths = filedialog.askopenfilenames(
             title="Select Video Source(s)",
-            filetypes=[('Video', '*.mp4 *.mov *.mkv *.avi *.wmv *.flv')])
+            filetypes=[('Video', '*.mp4 *.mov *.mkv *.avi *.wmv *.flv *.mpg *.mpeg')])
         if paths:
             self.video_paths = list(paths)
             count = len(self.video_paths)
