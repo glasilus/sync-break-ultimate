@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageSequence
 
 from rt_audio import AudioAnalyzer, RTAudioStats, make_segment_from_stats
-from effects import RGBShiftEffect, PixelSortEffect, DatamoshEffect, FlashEffect
+from effects import RGBShiftEffect, PixelSortEffect, DatamoshEffect, FlashEffect, ChromaKeyEffect
 from analyzer import SegmentType
 
 # Segment types that trigger a video cut (jump to random frame)
@@ -137,17 +137,33 @@ class OverlayManager:
     """Менеджер оверлеев"""
     def __init__(self):
         self.overlays = []
+        self.chroma_mode      = 'none'   # 'none'|'dominant'|'secondary'|'manual'
+        self.chroma_tolerance = 30
+        self.chroma_softness  = 5
+        self.chroma_color     = (0, 255, 0)
+        self._ck_cache: dict  = {}       # overlay name → ChromaKeyEffect
+
+    def set_chroma_key(self, mode: str, tolerance: int = 30,
+                       softness: int = 5, color=(0, 255, 0)):
+        self.chroma_mode      = mode
+        self.chroma_tolerance = tolerance
+        self.chroma_softness  = softness
+        self.chroma_color     = color
+        self._ck_cache.clear()
 
     def load_overlays(self, folder_path):
         self.overlays = []
+        self._ck_cache.clear()
         if not os.path.exists(folder_path):
             return
-        supported_ext = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
-        for file in os.listdir(folder_path):
-            if file.lower().endswith(supported_ext):
-                path = os.path.join(folder_path, file)
-                try:
-                    if file.lower().endswith('.gif'):
+        img_ext = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
+        vid_ext = ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg')
+        for file in sorted(os.listdir(folder_path)):
+            path = os.path.join(folder_path, file)
+            low = file.lower()
+            try:
+                if low.endswith(img_ext):
+                    if low.endswith('.gif'):
                         gif = Image.open(path)
                         frame = next(ImageSequence.Iterator(gif))
                         if frame.mode != 'RGBA':
@@ -159,15 +175,51 @@ class OverlayManager:
                             img = img.convert('RGBA')
                         img_np = np.array(img)
                     self.overlays.append({'image': img_np, 'name': file})
-                except Exception as e:
-                    print(f"Error loading overlay {file}: {e}")
+                elif low.endswith(vid_ext):
+                    cap = cv2.VideoCapture(path)
+                    idx = 0
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+                        self.overlays.append({'image': frame_rgba, 'name': f"{file}[{idx}]"})
+                        idx += 1
+                    cap.release()
+            except Exception as e:
+                print(f"Error loading overlay {file}: {e}")
 
     def get_random_overlay(self, max_width, max_height):
         if not self.overlays:
             return None, None, None
         overlay = random.choice(self.overlays)
-        img = overlay['image']
+        img = overlay['image'].copy()  # RGBA uint8
+
+        if self.chroma_mode != 'none':
+            name = overlay['name']
+            ck = self._ck_cache.get(name)
+            if ck is None:
+                img_rgb = img[:, :, :3]
+                if self.chroma_mode == 'dominant':
+                    ck = ChromaKeyEffect.from_frame(img_rgb, rank=0,
+                                                    tolerance=self.chroma_tolerance,
+                                                    edge_softness=self.chroma_softness)
+                elif self.chroma_mode == 'secondary':
+                    ck = ChromaKeyEffect.from_frame(img_rgb, rank=1,
+                                                    tolerance=self.chroma_tolerance,
+                                                    edge_softness=self.chroma_softness)
+                else:  # manual
+                    ck = ChromaKeyEffect(key_color=self.chroma_color,
+                                         tolerance=self.chroma_tolerance,
+                                         edge_softness=self.chroma_softness)
+                self._ck_cache[name] = ck
+            mask = ck.get_mask(img[:, :, :3])  # 0=keyed, 255=keep
+            existing_alpha = img[:, :, 3].astype(np.float32)
+            img[:, :, 3] = (existing_alpha * mask.astype(np.float32) / 255.0).astype(np.uint8)
+
         h, w = img.shape[:2]
+        if w == 0 or h == 0:
+            return None, None, None
         scale = min(max_width / w, max_height / h, 1.0) * random.uniform(0.3, 0.8)
         new_w = int(w * scale)
         new_h = int(h * scale)
@@ -339,13 +391,14 @@ class RealtimeEngine:
 
             if self.audio_stats['noisy'] and self.settings['fx_pixel_sort'] and random.random() < 0.3:
                 h, w = frame.shape[:2]
-                result = frame.copy()
-                for _ in range(int(h * 0.1)):
-                    y = random.randint(0, h - 1)
-                    line = result[y, :, :].copy()
-                    brightness = line[:, 0] * 0.114 + line[:, 1] * 0.587 + line[:, 2] * 0.299
-                    result[y, :, :] = line[np.argsort(brightness)]
-                frame = result
+                if frame.ndim == 3 and frame.shape[2] >= 3:
+                    result = frame.copy()
+                    for _ in range(int(h * 0.1)):
+                        y = random.randint(0, h - 1)
+                        line = result[y, :, :].copy()
+                        brightness = line[:, 0] * 0.114 + line[:, 1] * 0.587 + line[:, 2] * 0.299
+                        result[y, :, :] = line[np.argsort(brightness)]
+                    frame = result
 
             if _active and self.settings['fx_overlays'] and random.random() < self.settings['overlay_intensity']:
                 overlay, ov_w, ov_h = self.overlay_mgr.get_random_overlay(
@@ -353,13 +406,13 @@ class RealtimeEngine:
                 if overlay is not None:
                     x = random.randint(0, max(0, self.width  - ov_w))
                     y = random.randint(0, max(0, self.height - ov_h))
-                    if overlay.shape[2] == 4:
+                    if overlay.ndim == 3 and overlay.shape[2] == 4:
                         alpha = overlay[:, :, 3] / 255.0
                         roi = frame[y:y+ov_h, x:x+ov_w]
                         if roi.shape[:2] == overlay[:, :, :3].shape[:2]:
                             for c in range(3):
                                 roi[:, :, c] = (roi[:, :, c] * (1 - alpha)
-                                                + overlay[:, :, c] * alpha)
+                                                + overlay[:, :, c] * alpha).clip(0, 255).astype(np.uint8)
 
             return frame
 

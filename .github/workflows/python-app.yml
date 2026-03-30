@@ -84,7 +84,82 @@ jobs:
             README_RU.MD
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 2. macOS  (best-effort)
+  # 2. Linux  (best-effort)
+  # ───────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build — Linux
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-tk \
+            portaudio19-dev \
+            libsndfile1 \
+            ffmpeg \
+            libgl1
+
+      - name: Set up Python ${{ env.PY_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build DiscVPC01 (Linux)
+        run: |
+          pyinstaller \
+            --onefile --noconsole --clean --noupx \
+            --name DiscVPC01 \
+            --collect-all cv2 \
+            --collect-all librosa \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all imageio_ffmpeg \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --collect-all scenedetect \
+            --collect-all opensimplex \
+            --hidden-import=scenedetect.detectors \
+            gui.py
+
+      - name: Build DiscVPC01-RT (Linux)
+        run: |
+          pyinstaller \
+            --onefile --noconsole --clean --noupx \
+            --name DiscVPC01-RT \
+            --collect-all cv2 \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all opensimplex \
+            --collect-all librosa \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --hidden-import=sounddevice \
+            rt.py
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Disc-VPC-01-linux
+          path: |
+            dist/DiscVPC01
+            dist/DiscVPC01-RT
+            README.MD
+            README_RU.MD
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. macOS  (best-effort)
   # ───────────────────────────────────────────────────────────────────────────
   build-macos:
     name: Build — macOS
@@ -159,8 +234,8 @@ jobs:
   release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-windows, build-macos]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v') && !failure() && !cancelled()
 
     steps:
       - name: Download Windows artifact
@@ -168,6 +243,14 @@ jobs:
         with:
           name: Disc-VPC-01-windows
           path: windows-files
+
+      # Linux artifact may be absent if that job failed (continue-on-error)
+      - name: Download Linux artifact (if available)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: Disc-VPC-01-linux
+          path: linux-files
 
       # macOS artifact may be absent if that job failed (continue-on-error)
       - name: Download macOS artifact (if available)
@@ -180,6 +263,10 @@ jobs:
       - name: Create release ZIPs
         run: |
           cd windows-files && zip -r ../Disc-VPC-01-windows.zip . && cd ..
+          if [ -d linux-files ]; then
+            cd linux-files && chmod +x DiscVPC01 DiscVPC01-RT 2>/dev/null || true
+            zip -r ../Disc-VPC-01-linux.zip . && cd ..
+          fi
           if [ -d macos-files ]; then
             cd macos-files && chmod +x DiscVPC01 DiscVPC01-RT 2>/dev/null || true
             zip -r ../Disc-VPC-01-macos.zip . && cd ..

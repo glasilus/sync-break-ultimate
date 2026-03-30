@@ -169,6 +169,17 @@ class BreakcoreEngine:
         if c.get('fx_overlay') and c.get('overlay_dir'):
             overlay_frames = self._load_overlay_frames(c['overlay_dir'])
             if overlay_frames:
+                ck_mode = c.get('fx_overlay_ck_mode', 'none')
+                ck_tol  = int(c.get('fx_overlay_ck_tolerance', 30))
+                ck_soft = int(c.get('fx_overlay_ck_softness', 5))
+                manual_ck = None
+                if ck_mode == 'manual':
+                    ck_color = c.get('fx_overlay_ck_color', [0, 255, 0])
+                    manual_ck = ChromaKeyEffect(
+                        key_color=tuple(int(v) for v in ck_color),
+                        tolerance=ck_tol,
+                        edge_softness=ck_soft,
+                    )
                 chain.append(OverlayEffect(
                     enabled=True,
                     chance=_ch(c.get('fx_overlay_chance', 0.2)),
@@ -178,6 +189,10 @@ class BreakcoreEngine:
                     scale=c.get('fx_overlay_scale', 0.4),
                     scale_min=c.get('fx_overlay_scale_min', 0.15),
                     position=c.get('fx_overlay_position', 'random'),
+                    chroma_mode=ck_mode,
+                    chroma_tolerance=ck_tol,
+                    chroma_softness=ck_soft,
+                    chroma_key=manual_ck,
                 ))
             else:
                 self.log(f"WARNING: No images found in overlay folder: {c['overlay_dir']}")
@@ -186,22 +201,38 @@ class BreakcoreEngine:
         return chain
 
     def _load_overlay_frames(self, folder: str) -> List[np.ndarray]:
-        """Load all PNG/JPG images from folder as RGB numpy arrays."""
+        """Load all PNG/JPG/video images from folder as RGB numpy arrays."""
         from PIL import Image as PILImage
-        exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+        img_exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+        vid_exts = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg'}
         frames = []
         try:
             entries = sorted(os.listdir(folder))
         except OSError:
             return frames
         for name in entries:
-            if os.path.splitext(name)[1].lower() in exts:
-                path = os.path.join(folder, name)
+            ext = os.path.splitext(name)[1].lower()
+            path = os.path.join(folder, name)
+            if ext in img_exts:
                 try:
                     img = PILImage.open(path).convert('RGB')
                     frames.append(np.array(img))
                 except Exception:
                     pass
+            elif ext in vid_exts:
+                cap = None
+                try:
+                    cap = cv2.VideoCapture(path)
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                except Exception:
+                    pass
+                finally:
+                    if cap is not None:
+                        cap.release()
         return frames
 
     def _prepare_datamosh_source(self, video_path: str, output_path: str) -> bool:
@@ -229,6 +260,10 @@ class BreakcoreEngine:
         video_paths = raw_paths if isinstance(raw_paths, list) else [raw_paths]
         audio_path = self.cfg['audio_path']
         output_path = self.cfg['output_path']
+
+        if not os.path.exists(audio_path):
+            self.log(f"ERROR: audio file not found: {audio_path}")
+            return
 
         is_draft = render_mode == RENDER_DRAFT
         is_final = render_mode == RENDER_FINAL
@@ -390,8 +425,12 @@ class BreakcoreEngine:
                         dummy_frame = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                         flash_frame = flash_fx._apply(dummy_frame, seg, is_draft)
                         flash_frame = cv2.resize(flash_frame, (out_w, out_h))
-                        for _ in range(flash_frames):
-                            proc.stdin.write(flash_frame.tobytes())
+                        flash_bytes = flash_frame.tobytes()
+                        try:
+                            for _ in range(flash_frames):
+                                proc.stdin.write(flash_bytes)
+                        except (BrokenPipeError, OSError):
+                            break
 
                 frames_written = 0
                 while frames_written < n_frames:
@@ -454,4 +493,6 @@ class BreakcoreEngine:
 
         if not self.abort:
             self.log(f"Done. Output: {output_path}")
+            return True
+        return False
 

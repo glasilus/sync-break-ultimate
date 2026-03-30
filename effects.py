@@ -755,14 +755,40 @@ class MysterySection:
 
 # ── Task 14: ChromaKeyEffect + OverlayEffect ─────────────────────────
 
+def _dominant_hue(img_rgb: np.ndarray, rank: int = 0) -> int:
+    """Return OpenCV hue (0-179) of the rank-th most frequent colour cluster."""
+    rgb3 = img_rgb[:, :, :3]
+    hsv = cv2.cvtColor(rgb3, cv2.COLOR_RGB2HSV)
+    h_ch = hsv[:, :, 0].flatten()
+    s_ch = hsv[:, :, 1].flatten()
+    # prefer saturated pixels to avoid greys/blacks skewing the result
+    saturated = h_ch[s_ch > 40]
+    source = saturated if len(saturated) > 200 else h_ch
+    bins, _ = np.histogram(source, bins=18, range=(0, 180))
+    order = np.argsort(bins)[::-1]
+    idx = int(order[rank]) if rank < len(order) else int(order[0])
+    return idx * 10 + 5  # centre of the 10-degree bin
+
+
 class ChromaKeyEffect:
     def __init__(self, key_color=(0, 255, 0), tolerance=30, edge_softness=5):
         self.key_color = key_color
         self.tolerance = tolerance
         self.edge_softness = edge_softness
 
+    @classmethod
+    def from_frame(cls, img_rgb: np.ndarray, rank: int = 0,
+                   tolerance: int = 30, edge_softness: int = 5) -> 'ChromaKeyEffect':
+        """Build a ChromaKeyEffect targeting the rank-th most frequent hue."""
+        hue = _dominant_hue(img_rgb, rank)
+        key_hsv = np.uint8([[[hue, 200, 200]]])
+        key_rgb = cv2.cvtColor(key_hsv, cv2.COLOR_HSV2RGB)[0, 0]
+        return cls(key_color=tuple(int(x) for x in key_rgb),
+                   tolerance=tolerance, edge_softness=edge_softness)
+
     def get_mask(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+        """Return uint8 mask: 0 = keyed out, 255 = keep."""
+        hsv = cv2.cvtColor(frame[:, :, :3], cv2.COLOR_RGB2HSV)
         key_hsv = cv2.cvtColor(
             np.uint8([[list(self.key_color)]]), cv2.COLOR_RGB2HSV)[0, 0]
         h_center = int(key_hsv[0])
@@ -804,19 +830,24 @@ class OverlayEffect(BaseEffect):
     trigger_types = list(SegmentType)
 
     def __init__(self, overlay_frames=None, chroma_key=None,
+                 chroma_mode='none', chroma_tolerance=30, chroma_softness=5,
                  opacity=0.85, blend_mode='screen',
                  scale=0.4, scale_min=0.15,
                  position='random', **kw):
         super().__init__(**kw)
-        self.overlay_frames = overlay_frames or []
-        self.chroma_key     = chroma_key
-        self.opacity        = opacity
-        self.blend_mode     = blend_mode
-        self.scale          = scale
-        self.scale_min      = scale_min
-        self.position       = position
-        self._idx           = 0
-        self._corner        = 0
+        self.overlay_frames    = overlay_frames or []
+        self.chroma_key        = chroma_key       # ChromaKeyEffect for 'manual' mode
+        self.chroma_mode       = chroma_mode      # 'none'|'dominant'|'secondary'|'manual'
+        self.chroma_tolerance  = chroma_tolerance
+        self.chroma_softness   = chroma_softness
+        self.opacity           = opacity
+        self.blend_mode        = blend_mode
+        self.scale             = scale
+        self.scale_min         = scale_min
+        self.position          = position
+        self._idx              = 0
+        self._corner           = 0
+        self._ck_cache: dict   = {}               # overlay idx → ChromaKeyEffect
 
         # Per-segment state — decided once when t_start changes
         self._seg_t_start: float = -1.0
@@ -877,9 +908,6 @@ class OverlayEffect(BaseEffect):
                 cur_scale = max(0.05, min(1.0, cur_scale))
 
                 ov_src = self.overlay_frames[self._seg_ov_idx]
-                if self.chroma_key is not None:
-                    ov_src = self.chroma_key.apply_to_frame(ov_src)
-
                 ov_h_src, ov_w_src = ov_src.shape[:2]
                 th = max(4, int(h * cur_scale))
                 tw = max(4, int(th * ov_w_src / max(ov_h_src, 1)))
@@ -911,19 +939,45 @@ class OverlayEffect(BaseEffect):
         x0, y0 = self._seg_x0, self._seg_y0
 
         ov_src = self.overlay_frames[self._seg_ov_idx]
-        if self.chroma_key is not None:
-            ov_src = self.chroma_key.apply_to_frame(ov_src)
-
-        ov = cv2.resize(ov_src, (tw, th),
-                        interpolation=cv2.INTER_AREA if draft else cv2.INTER_LINEAR)
+        interp = cv2.INTER_AREA if draft else cv2.INTER_LINEAR
+        ov = cv2.resize(ov_src, (tw, th), interpolation=interp)
 
         intensity = self.scaled_intensity(seg)
         alpha = min(1.0, self.opacity * (0.4 + intensity * 0.6))
 
         result = frame.copy()
         roi    = result[y0:y0 + th, x0:x0 + tw].astype(np.float32)
-        ov_f   = ov.astype(np.float32)
+        ov_f   = ov[:, :, :3].astype(np.float32)
 
-        blended_roi = _ensure_uint8(self._blend(roi, ov_f, alpha))
+        # --- chroma key: build or retrieve cached ChromaKeyEffect ----------
+        ck = None
+        if self.chroma_mode == 'dominant':
+            ck = self._ck_cache.get(self._seg_ov_idx)
+            if ck is None:
+                ck = ChromaKeyEffect.from_frame(ov_src, rank=0,
+                                                tolerance=self.chroma_tolerance,
+                                                edge_softness=self.chroma_softness)
+                self._ck_cache[self._seg_ov_idx] = ck
+        elif self.chroma_mode == 'secondary':
+            ck = self._ck_cache.get(self._seg_ov_idx)
+            if ck is None:
+                ck = ChromaKeyEffect.from_frame(ov_src, rank=1,
+                                                tolerance=self.chroma_tolerance,
+                                                edge_softness=self.chroma_softness)
+                self._ck_cache[self._seg_ov_idx] = ck
+        elif self.chroma_mode == 'manual' and self.chroma_key is not None:
+            ck = self.chroma_key
+
+        if ck is not None:
+            # Per-pixel alpha: mask (0=keyed, 255=keep) × flat opacity
+            mask_src = ck.get_mask(ov_src)
+            mask = cv2.resize(mask_src, (tw, th), interpolation=interp)
+            per_pixel_alpha = (mask.astype(np.float32) / 255.0) * alpha
+            ppa = per_pixel_alpha[:, :, np.newaxis]
+            blended = self._blend(roi, ov_f, 1.0)
+            blended_roi = _ensure_uint8(roi * (1.0 - ppa) + blended * ppa)
+        else:
+            blended_roi = _ensure_uint8(self._blend(roi, ov_f, alpha))
+
         result[y0:y0 + th, x0:x0 + tw] = blended_roi
         return result

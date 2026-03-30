@@ -1,4 +1,5 @@
 import random
+import sys
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox, ttk
 import threading
@@ -268,15 +269,21 @@ class MainGUI(tk.Tk):
 
         # Extra numeric vars not in defaults dict
         extras = {
-            'fx_overlay_chance':   0.5,
-            'fx_overlay_opacity':  0.85,
-            'fx_overlay_scale':    0.4,
-            'fx_overlay_scale_min':0.15,
+            'fx_overlay_chance':        0.5,
+            'fx_overlay_opacity':       0.85,
+            'fx_overlay_scale':         0.4,
+            'fx_overlay_scale_min':     0.15,
+            'fx_overlay_ck_tolerance':  30.0,
+            'fx_overlay_ck_softness':   5.0,
+            'fx_overlay_ck_r':          0.0,
+            'fx_overlay_ck_g':          255.0,
+            'fx_overlay_ck_b':          0.0,
             'fx_ascii_fg_r': 0.0, 'fx_ascii_fg_g': 255.0, 'fx_ascii_fg_b': 0.0,
             'fx_ascii_bg_r': 0.0, 'fx_ascii_bg_g': 0.0,   'fx_ascii_bg_b': 0.0,
         }
         self.var_overlay_blend    = tk.StringVar(value='screen')
         self.var_overlay_position = tk.StringVar(value='random')
+        self.var_overlay_ck_mode  = tk.StringVar(value='none')
         self.var_silence_mode = tk.StringVar(value='dim')
         for name, val in extras.items():
             self.vars[name] = tk.DoubleVar(value=val)
@@ -685,6 +692,18 @@ class MainGUI(tk.Tk):
                      textvariable=self.var_overlay_position,
                      style='W95.TCombobox', width=14).pack(padx=6, pady=3)
 
+        lf_ck = self._sub_labelframe(f, 'Chroma Key (Green Screen)')
+        ttk.Combobox(lf_ck, values=['none', 'dominant', 'secondary', 'manual'],
+                     textvariable=self.var_overlay_ck_mode,
+                     style='W95.TCombobox', width=12).pack(padx=6, pady=(4, 2))
+        self._slider_block(lf_ck, 'Tolerance', 'fx_overlay_ck_tolerance', 5, 60)
+        self._slider_block(lf_ck, 'Edge Softness', 'fx_overlay_ck_softness', 1, 21)
+
+        lf_ck2 = self._sub_labelframe(f, 'Manual Key Color  R / G / B')
+        self._slider_block(lf_ck2, 'Red',   'fx_overlay_ck_r', 0, 255)
+        self._slider_block(lf_ck2, 'Green', 'fx_overlay_ck_g', 0, 255)
+        self._slider_block(lf_ck2, 'Blue',  'fx_overlay_ck_b', 0, 255)
+
         btn_frame = tk.Frame(f, bg=C_SILVER)
         btn_frame.pack(fill='x', padx=10, pady=6)
         ttk.Button(btn_frame, text='Select Overlay Folder...',
@@ -992,6 +1011,10 @@ class MainGUI(tk.Tk):
         cfg['fx_ascii_color_mode']  = self.var_ascii_color_mode.get()
         cfg['fx_overlay_blend']     = self.var_overlay_blend.get()
         cfg['fx_overlay_position']  = self.var_overlay_position.get()
+        cfg['fx_overlay_ck_mode']   = self.var_overlay_ck_mode.get()
+        cfg['fx_overlay_ck_color']  = [int(cfg.pop('fx_overlay_ck_r', 0)),
+                                        int(cfg.pop('fx_overlay_ck_g', 255)),
+                                        int(cfg.pop('fx_overlay_ck_b', 0))]
         cfg['silence_mode'] = self.var_silence_mode.get()
         cfg['fx_ascii_fg']          = [int(cfg.pop('fx_ascii_fg_r', 0)),
                                         int(cfg.pop('fx_ascii_fg_g', 255)),
@@ -1024,6 +1047,7 @@ class MainGUI(tk.Tk):
         self.var_ascii_color_mode.set('fixed')
         self.var_overlay_blend.set('screen')
         self.var_overlay_position.set('random')
+        self.var_overlay_ck_mode.set('none')
         # Apply preset overrides
         cfg = PRESETS.get(preset_name, {})
         for key, value in cfg.items():
@@ -1032,7 +1056,12 @@ class MainGUI(tk.Tk):
         self.log(f"Preset '{preset_name}' loaded.")
 
     # ------------------------------------------------------------------ presets file I/O
-    _PRESETS_PATH = os.path.join(os.path.dirname(__file__), 'presets.json')
+    _PRESETS_PATH = os.path.join(
+        os.path.dirname(sys.executable)
+        if getattr(sys, 'frozen', False)
+        else os.path.dirname(os.path.abspath(__file__)),
+        'presets.json',
+    )
 
     def _load_presets_file(self):
         if not os.path.exists(self._PRESETS_PATH):
@@ -1087,6 +1116,11 @@ class MainGUI(tk.Tk):
             self.vars['fx_ascii_bg_r'].set(r)
             self.vars['fx_ascii_bg_g'].set(g)
             self.vars['fx_ascii_bg_b'].set(b)
+        if 'fx_overlay_ck_color' in cfg:
+            r, g, b = cfg['fx_overlay_ck_color']
+            self.vars['fx_overlay_ck_r'].set(r)
+            self.vars['fx_overlay_ck_g'].set(g)
+            self.vars['fx_overlay_ck_b'].set(b)
         if 'mystery' in cfg:
             for sub_key, val in cfg['mystery'].items():
                 k = f'mystery_{sub_key}'
@@ -1096,6 +1130,7 @@ class MainGUI(tk.Tk):
         self.var_ascii_color_mode.set(cfg.get('fx_ascii_color_mode', 'fixed'))
         self.var_overlay_blend.set(cfg.get('fx_overlay_blend', 'screen'))
         self.var_overlay_position.set(cfg.get('fx_overlay_position', 'random'))
+        self.var_overlay_ck_mode.set(cfg.get('fx_overlay_ck_mode', 'none'))
         self.res_combo.set(cfg.get('resolution', '720p'))
         self.preset_enc_combo.set(cfg.get('export_preset', 'medium'))
         self.log(f"Preset '{name}' loaded.")

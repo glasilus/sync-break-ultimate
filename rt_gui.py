@@ -197,6 +197,38 @@ class RealtimeGUI(tk.Tk):
                    ).pack(fill='x', padx=4, pady=1)
         self.overlay_intensity_var.trace_add('write', self._sync_settings)
 
+        # Chroma key section
+        ck_lf = tk.LabelFrame(ef, text="Chroma Key", bg=C_SILVER, fg=C_TEXT_BLACK,
+                               font='MS_Sans_Serif 8', bd=2, relief='groove')
+        ck_lf.pack(fill='x', padx=4, pady=(2, 0))
+
+        self.ck_mode_var = tk.StringVar(value='none')
+        ttk.Combobox(ck_lf, values=['none', 'dominant', 'secondary', 'manual'],
+                     textvariable=self.ck_mode_var, width=11,
+                     state='readonly').pack(padx=4, pady=(3, 1))
+        self.ck_mode_var.trace_add('write', self._sync_chroma)
+
+        self.ck_tol_var = tk.DoubleVar(value=30.0)
+        _make_scale(ck_lf, "Tolerance:", self.ck_tol_var, 5, 60, 1
+                   ).pack(fill='x', padx=4, pady=1)
+        self.ck_tol_var.trace_add('write', self._sync_chroma)
+
+        self.ck_soft_var = tk.DoubleVar(value=5.0)
+        _make_scale(ck_lf, "Softness:", self.ck_soft_var, 1, 21, 1
+                   ).pack(fill='x', padx=4, pady=1)
+        self.ck_soft_var.trace_add('write', self._sync_chroma)
+
+        # Manual color RGB
+        self.ck_r_var = tk.DoubleVar(value=0.0)
+        self.ck_g_var = tk.DoubleVar(value=255.0)
+        self.ck_b_var = tk.DoubleVar(value=0.0)
+        _make_scale(ck_lf, "Key R:", self.ck_r_var, 0, 255, 1).pack(fill='x', padx=4, pady=1)
+        _make_scale(ck_lf, "Key G:", self.ck_g_var, 0, 255, 1).pack(fill='x', padx=4, pady=1)
+        _make_scale(ck_lf, "Key B:", self.ck_b_var, 0, 255, 1).pack(fill='x', padx=4, pady=(1, 3))
+        self.ck_r_var.trace_add('write', self._sync_chroma)
+        self.ck_g_var.trace_add('write', self._sync_chroma)
+        self.ck_b_var.trace_add('write', self._sync_chroma)
+
         bot = tk.Frame(ef, bg=C_SILVER)
         bot.pack(fill='x', padx=4, pady=(1, 4))
         self.seq_btn = tk.Button(bot, text="Sequential", font='MS_Sans_Serif 9',
@@ -302,6 +334,16 @@ class RealtimeGUI(tk.Tk):
         self._sync_settings()
 
     # ── Settings sync ─────────────────────────────────────────────────────────
+
+    def _sync_chroma(self, *_):
+        self.engine.overlay_mgr.set_chroma_key(
+            mode=self.ck_mode_var.get(),
+            tolerance=int(self.ck_tol_var.get()),
+            softness=int(self.ck_soft_var.get()),
+            color=(int(self.ck_r_var.get()),
+                   int(self.ck_g_var.get()),
+                   int(self.ck_b_var.get())),
+        )
 
     def _sync_settings(self, *_):
         self.engine.settings.update({
@@ -484,25 +526,29 @@ class RealtimeGUI(tk.Tk):
 
                 if self.fullscreen_window:
                     try:
-                        fw = self.fullscreen_window.winfo_width()  or 1280
-                        fh = self.fullscreen_window.winfo_height() or 720
+                        fw = self.fullscreen_window.winfo_width()
+                        fh = self.fullscreen_window.winfo_height()
+                        if fw < 10: fw = self.fullscreen_window.winfo_screenwidth()
+                        if fh < 10: fh = self.fullscreen_window.winfo_screenheight()
                         fs_img = ImageTk.PhotoImage(
                             image=Image.fromarray(cv2.resize(frame, (fw, fh))))
                         self.fs_label.imgtk = fs_img
                         self.fs_label.config(image=fs_img)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        print(f"[fullscreen render] {_e}")
 
                 if self.second_monitor_window:
                     try:
-                        sw = self.second_monitor_window.winfo_width()  or 800
-                        sh = self.second_monitor_window.winfo_height() or 600
+                        sw = self.second_monitor_window.winfo_width()
+                        sh = self.second_monitor_window.winfo_height()
+                        if sw < 10: sw = self.winfo_screenwidth()
+                        if sh < 10: sh = self.winfo_screenheight()
                         sm_img = ImageTk.PhotoImage(
                             image=Image.fromarray(cv2.resize(frame, (sw, sh))))
                         self.sm_label.imgtk = sm_img
                         self.sm_label.config(image=sm_img)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        print(f"[second monitor render] {_e}")
 
                 self._update_indicators()
 

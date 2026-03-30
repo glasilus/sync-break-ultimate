@@ -1,6 +1,6 @@
 # Disc VPC 01 — User Manual
 
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Requires:** Python 3.10.x · Windows 10/11 (macOS best-effort)
 
 ---
@@ -23,7 +23,7 @@
     - [3.6 Effects — Glitch](#36-effects--glitch)
     - [3.7 Effects — Complex](#37-effects--complex)
     - [3.8 Effects — Degradation](#38-effects--degradation)
-    - [3.9 Effects — Overlays](#39-effects--overlays)
+    - [3.9 Effects — Overlays and Chroma Key](#39-effects--overlays-and-chroma-key)
     - [3.10 Export Settings](#310-export-settings)
     - [3.11 Presets](#311-presets)
     - [3.12 Render Modes](#312-render-modes)
@@ -33,7 +33,6 @@
   - [4. Disc VPC 01 R-T — Real-Time](#4-disc-vpc-01-r-t--real-time)
     - [4.1 Interface Layout](#41-interface-layout)
     - [4.2 Setup](#42-setup)
-    - [4.0 Multiple Video Sources](#40-multiple-video-sources)
     - [4.3 Audio Calibration](#43-audio-calibration)
     - [4.4 Controls and Parameters](#44-controls-and-parameters)
     - [4.5 Effects](#45-effects)
@@ -102,7 +101,8 @@ The bundle contains:
 Disc-VPC-01-windows/
 ├── DiscVPC01.exe       ← offline editor
 ├── DiscVPC01-RT.exe    ← real-time
-└── README.pdf          ← this document
+├── README.MD           ← this document (English)
+└── README_RU.MD        ← this document (Russian)
 ```
 
 No installation required. Run directly.
@@ -370,7 +370,7 @@ Each effect has a **Chance** slider.
 
 ---
 
-### 3.9 Effects — Overlays
+### 3.9 Effects — Overlays and Chroma Key
 
 Overlays composite external image files onto video frames. Load an overlay folder via **Load Source Video → Load Overlays folder** (sidebar, below the video button), or through the Overlays tab.
 
@@ -391,9 +391,30 @@ The engine selects a random image from the folder on each eligible frame and com
 
 **Position:**
 - `random` — the overlay is placed at a random position within the frame bounds
-- Additional position modes (centered, corners) may be added via preset overrides
+- `center` — the overlay is centered on the frame
+- `corners` — the overlay cycles through corner positions
 
-Supported overlay formats: `.png`, `.jpg`, `.gif` (first frame only), `.bmp`
+Supported overlay formats: `.png`, `.jpg`, `.gif` (first frame only), `.bmp`, `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, `.wmv`, `.mpg`, `.mpeg`
+
+Video files are loaded frame-by-frame; each frame becomes an independent overlay image in the pool.
+
+---
+
+### Chroma Key (Green Screen)
+
+Removes a background colour from each overlay image before compositing, making that colour transparent.
+
+**Mode:**
+- `none` — chroma key disabled (default)
+- `dominant` — automatically detects and removes the most frequent colour in the overlay (e.g. green screen)
+- `secondary` — removes the second most frequent colour
+- `manual` — removes the colour specified by the R/G/B sliders below
+
+**Tolerance** *(5 – 60)* — how wide a hue range around the key colour is keyed out. Increase if green screen edges are not fully removed; decrease to avoid removing too much of the subject.
+
+**Edge Softness** *(1 – 21)* — applies a Gaussian blur to the key mask edge, feathering the transition between keyed and non-keyed areas.
+
+**Manual Key Color (R / G / B)** *(0 – 255 each)* — the target colour for `manual` mode. Default is pure green (0, 255, 0).
 
 ---
 
@@ -532,21 +553,11 @@ Select the desired device before starting. The **↺** button refreshes the devi
 
 **Changing the device while running:** Select a new device from the dropdown while the engine is active. The audio stream switches immediately and recalibration begins automatically.
 
-**📁 Video** — load the video file to be played and processed. Supported formats: `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, `.wmv`.
+**📁 Video** — load one or more video files to be played and processed. Supported formats: `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, `.wmv`, `.mpg`, `.mpeg`. Hold `Ctrl` or `Shift` to select multiple files at once.
+
+When multiple files are loaded, the engine keeps a separate sequential reader for each. Random cuts (triggered by audio events) jump to a random frame from a randomly selected source. Sequential playback stays within the current source until its end, then continues from the next source on the following call. Pre-caching runs on all sources in parallel on startup. The label shows `N videos loaded` when more than one file is active.
 
 **📁 Overlays** — load a folder of overlay images (same formats as §3.9).
-
----
-
-### 4.0 Multiple Video Sources
-
-The **📁 Video** button in R-T also accepts multiple files. Select them all at once in the dialog.
-
-When multiple files are loaded, the engine keeps a separate sequential reader for each. Random cuts (triggered by audio events) jump to a random frame from a randomly selected source. Sequential playback stays within the current source until its end, then continues from where it left off on the next sequential call.
-
-Pre-caching runs on all sources in parallel on startup, so the first frame from any source is available immediately.
-
-The label shows `N videos loaded` when more than one file is active.
 
 ---
 
@@ -612,6 +623,8 @@ Each effect is a toggle button. Active effects appear highlighted (dark backgrou
 | **Overlays** | Composites random images from the loaded overlay folder onto frames |
 
 **Ovl Freq** *(0.0 – 1.0)* — probability per frame that an overlay is placed when the audio is active and the Overlays effect is enabled.
+
+**Chroma Key** — background removal for overlay images. Uses the same modes and parameters as §3.9: `none`, `dominant`, `secondary`, `manual`. Tolerance, Edge Softness, and Manual Key Color sliders are available in the Chroma Key section of the Effects panel.
 
 ---
 
