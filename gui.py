@@ -37,55 +37,81 @@ C_GREEN_DOT  = '#00AA00'
 C_RED_BTN    = '#CC2222'
 
 # --- PRESETS ---
+# Each entry is a sparse override on top of defaults.
+# Together all presets cover at least one effect from every accordion group:
+#   CUT LOGIC · CORE FX · GLITCH · DEGRADATION · COMPLEX · OVERLAYS · MYSTERY
 PRESETS = {
+    # ── no effects, useful as a clean starting point ──────────────────────────
+    "Blank (No Effects)": {
+        'chaos_level': 0.0, 'threshold': 1.0, 'min_cut_duration': 0.08,
+        'scene_buffer_size': 10, 'use_scene_detect': False,
+        # all fx flags default to False — nothing to override here
+    },
+
+    # ── CUT LOGIC + CORE(stutter/flash/rgb) + GLITCH(block/drift) + DEGRADATION(zoom) ──
     "Drillcore (Fast Cut/Stutter)": {
         'chaos_level': 0.8, 'threshold': 1.0, 'min_cut_duration': 0.05,
         'scene_buffer_size': 5, 'use_scene_detect': False,
         'fx_stutter': True,
-        'fx_flash': True, 'fx_flash_chance': 0.5,
-        'fx_rgb': True, 'fx_rgb_chance': 0.7,
-        'fx_psort': True, 'fx_psort_chance': 0.2, 'fx_psort_int': 0.3,
+        'fx_flash': True,  'fx_flash_chance': 0.5,
+        'fx_rgb': True,    'fx_rgb_chance': 0.7,
         'fx_block_glitch': True, 'fx_block_glitch_chance': 0.6,
-        'fx_zoom_glitch': True, 'fx_zoom_glitch_chance': 0.7,
-        'fx_pixel_drift': True, 'fx_pixel_drift_chance': 0.4,
+        'fx_pixel_drift':  True, 'fx_pixel_drift_chance': 0.5,
+        'fx_zoom_glitch':  True, 'fx_zoom_glitch_chance': 0.7,
     },
+
+    # ── CUT LOGIC(scene) + CORE(ghost/datamosh) + GLITCH(colorbleed/freeze) + COMPLEX(feedback/echo) ──
     "Datamosh (P-frame Bleed)": {
-        'chaos_level': 0.4, 'threshold': 1.4, 'min_cut_duration': 0.1,
+        'chaos_level': 0.3, 'threshold': 1.4, 'min_cut_duration': 0.12,
         'scene_buffer_size': 20, 'use_scene_detect': True,
+        'fx_ghost': True,    'fx_ghost_int': 0.6,
         'fx_datamosh': True, 'fx_datamosh_chance': 0.8,
-        'fx_psort': True, 'fx_psort_chance': 0.5, 'fx_psort_int': 0.6,
+        'fx_colorbleed':     True, 'fx_colorbleed_chance': 0.7,
+        'fx_freeze_corrupt': True, 'fx_freeze_corrupt_chance': 0.4,
         'fx_feedback': True,
-        'fx_ghost': True, 'fx_ghost_int': 0.6,
-        'fx_colorbleed': True, 'fx_colorbleed_chance': 0.7,
+        'fx_echo': True, 'fx_echo_chance': 0.5,
+        'fx_spatial_reverb': True, 'fx_spatial_reverb_chance': 0.5, 'fx_spatial_reverb_decay': 0.2,
     },
+
+    # ── CORE(ascii/rgb) + DEGRADATION(scanlines/dither) + COMPLEX(kali) + MYSTERY(DOT) ──
     "ASCII Rave": {
-        'chaos_level': 0.6, 'threshold': 1.0, 'min_cut_duration': 0.08,
+        'chaos_level': 0.5, 'threshold': 1.0, 'min_cut_duration': 0.08,
         'scene_buffer_size': 10, 'use_scene_detect': False,
-        'fx_ascii': True, 'fx_ascii_chance': 0.9, 'fx_ascii_size': 10, 'fx_ascii_blend': 0.3,
-        'fx_stutter': True,
-        'fx_flash': True, 'fx_flash_chance': 0.6,
-        'fx_rgb': True, 'fx_rgb_chance': 0.5,
+        'fx_ascii': True, 'fx_ascii_chance': 0.9,
+        'fx_ascii_size': 10, 'fx_ascii_blend': 0.3,
+        'fx_rgb': True,      'fx_rgb_chance': 0.5,
         'fx_scanlines': True, 'fx_scanlines_chance': 0.8,
+        'fx_dither': True,   'fx_dither_chance': 0.5,
+        'fx_kali': True,     'fx_kali_chance': 0.3,
+        'fx_temporal_rgb': True, 'fx_temporal_rgb_lag': 6.0,
+        'mystery_DOT': 0.4,
     },
+
+    # ── CUT LOGIC(max) + CORE(stutter/flash/psort) + GLITCH(neg) + DEGRADATION(jpeg/signal/vhs) + COMPLEX(cascade) ──
     "Death Grips Mode": {
         'chaos_level': 0.9, 'threshold': 0.9, 'min_cut_duration': 0.04,
         'scene_buffer_size': 5, 'use_scene_detect': False,
         'fx_stutter': True,
-        'fx_flash': True, 'fx_flash_chance': 0.8,
-        'fx_block_glitch': True, 'fx_block_glitch_chance': 0.7,
-        'fx_jpeg_crush': True, 'fx_jpeg_crush_chance': 0.6,
-        'fx_pixel_drift': True, 'fx_pixel_drift_chance': 0.6,
-        'fx_bad_signal': True, 'fx_bad_signal_chance': 0.5,
-        'fx_cascade': True, 'fx_cascade_chance': 0.5,
-        'fx_negative': True, 'fx_negative_chance': 0.2,
-        'fx_vhs': True, 'fx_vhs_chance': 0.4,
+        'fx_flash': True,     'fx_flash_chance': 0.8,
+        'fx_psort': True,     'fx_psort_chance': 0.5, 'fx_psort_int': 0.5,
+        'fx_negative': True,  'fx_negative_chance': 0.3,
+        'fx_jpeg_crush': True,'fx_jpeg_crush_chance': 0.6,
+        'fx_bad_signal': True,'fx_bad_signal_chance': 0.5,
+        'fx_vhs': True,       'fx_vhs_chance': 0.4,
+        'fx_cascade': True,   'fx_cascade_chance': 0.5,
     },
+
+    # ── CUT LOGIC(scene) + CORE(flash) + DEGRADATION(bitcrush/fisheye/interlace) + COMPLEX(phase_shift) + OVERLAYS + MYSTERY(RESONANCE) ──
     "Rhythm Flash (Scene Mix)": {
-        'chaos_level': 0.6, 'threshold': 1.1, 'min_cut_duration': 0.08,
+        'chaos_level': 0.5, 'threshold': 1.1, 'min_cut_duration': 0.08,
         'scene_buffer_size': 15, 'use_scene_detect': True,
-        'fx_stutter': True,
-        'fx_flash': True, 'fx_flash_chance': 1.0,
-        'fx_zoom_glitch': True, 'fx_zoom_glitch_chance': 0.5,
+        'fx_flash': True,     'fx_flash_chance': 1.0,
+        'fx_bitcrush': True,  'fx_bitcrush_chance': 0.4,
+        'fx_fisheye': True,   'fx_fisheye_chance': 0.3,
+        'fx_interlace': True, 'fx_interlace_chance': 0.5,
+        'fx_phase_shift': True, 'fx_phase_shift_chance': 0.5,
+        'fx_overlay': True,   'fx_overlay_chance': 0.4,
+        'mystery_RESONANCE': 0.3,
     },
 }
 
@@ -239,6 +265,17 @@ class MainGUI(tk.Tk):
             'fx_echo': False,           'fx_echo_chance': 0.4,
             'fx_kali': False,           'fx_kali_chance': 0.3,
             'fx_cascade': False,        'fx_cascade_chance': 0.4,
+            # Signal domain
+            'fx_resonant': False,       'fx_resonant_chance': 0.5,
+            'fx_temporal_rgb': False,
+            'fx_fft_phase': False,      'fx_fft_phase_chance': 0.5,
+            'fx_waveshaper': False,     'fx_waveshaper_chance': 0.5,
+            'fx_histo_lag': False,
+            'fx_wrong_sub': False,      'fx_wrong_sub_chance': 0.5,
+            'fx_gameoflife': False,     'fx_gameoflife_chance': 0.5,
+            'fx_ela': False,            'fx_ela_chance': 0.5,
+            'fx_dtype_corrupt': False,  'fx_dtype_corrupt_chance': 0.5,
+            'fx_spatial_reverb': False, 'fx_spatial_reverb_chance': 0.5,
             # Overlays
             'fx_overlay': False,
             # Export
@@ -269,6 +306,17 @@ class MainGUI(tk.Tk):
 
         # Extra numeric vars not in defaults dict
         extras = {
+            'fx_resonant_freq':         0.08,
+            'fx_resonant_q':            12.0,
+            'fx_temporal_rgb_lag':      8.0,
+            'fx_fft_phase_amount':      0.5,
+            'fx_waveshaper_drive':      3.0,
+            'fx_histo_lag_frames':      30.0,
+            'fx_wrong_sub_factor':      4.0,
+            'fx_gameoflife_iters':      2.0,
+            'fx_ela_blend':             0.5,
+            'fx_dtype_corrupt_amount':  0.05,
+            'fx_spatial_reverb_decay':  0.15,
             'fx_overlay_chance':        0.5,
             'fx_overlay_opacity':       0.85,
             'fx_overlay_scale':         0.4,
@@ -713,6 +761,63 @@ class MainGUI(tk.Tk):
                                         font=('Courier New', 9))
         self.lbl_overlay_dir.pack(anchor='w', pady=(2, 0))
 
+    def _tab_signal_domain(self, f):
+        tk.Label(f, text='[ SIGNAL DOMAIN — WRONG PHYSICS APPLIED TO LIGHT ]',
+                 bg=C_SILVER, fg=C_DARK_GRAY,
+                 font=('Courier New', 8, 'italic')).pack(pady=(8, 2), padx=10, anchor='w')
+
+        self._effect_row(f, 'Resonant Rows', 'fx_resonant', 'fx_resonant_chance',
+                         note='IIR bandpass along pixel rows — spatial ringing at edges')
+        self._slider_block(f, 'Resonance Freq (cycles/px)',
+                           'fx_resonant_freq', 0.01, 0.3, indent=True)
+        self._slider_block(f, 'Q factor (sharpness)',
+                           'fx_resonant_q', 2.0, 30.0, indent=True)
+
+        self._effect_row_simple(f, 'Temporal RGB Shift', 'fx_temporal_rgb',
+                                note='R/G/B channels from different time offsets — chromatic time ghost')
+        self._slider_block(f, 'Lag (frames)',
+                           'fx_temporal_rgb_lag', 2.0, 20.0, indent=True)
+
+        self._effect_row(f, 'FFT Phase Corrupt', 'fx_fft_phase', 'fx_fft_phase_chance',
+                         note='Scrambles 2D FFT phase, preserves magnitude — wave interference')
+        self._slider_block(f, 'Phase Noise Amount',
+                           'fx_fft_phase_amount', 0.05, 1.0, indent=True)
+
+        self._effect_row(f, 'Waveshaper / Tube Sat', 'fx_waveshaper', 'fx_waveshaper_chance',
+                         note='Tube amplifier saturation on pixel values — analogue colour distortion')
+        self._slider_block(f, 'Drive',
+                           'fx_waveshaper_drive', 0.5, 8.0, indent=True)
+
+        self._effect_row_simple(f, 'Histogram Lag', 'fx_histo_lag',
+                                note='Colour palette from N frames ago — temporal colour memory')
+        self._slider_block(f, 'Palette Lag (frames)',
+                           'fx_histo_lag_frames', 5.0, 90.0, indent=True)
+
+        self._effect_row(f, 'Wrong Chroma Sub (4:1:N)', 'fx_wrong_sub', 'fx_wrong_sub_chance',
+                         note='Extreme chroma subsampling — colour blocks bleed over sharp edges')
+        self._slider_block(f, 'Downsample Factor',
+                           'fx_wrong_sub_factor', 2.0, 8.0, indent=True)
+
+        self._effect_row(f, 'Game of Life Mask', 'fx_gameoflife', 'fx_gameoflife_chance',
+                         note='Conway automaton on frame as corruption mask — organic glitch')
+        self._slider_block(f, 'Iterations',
+                           'fx_gameoflife_iters', 1.0, 5.0, indent=True)
+
+        self._effect_row(f, 'ELA (Error Level Analysis)', 'fx_ela', 'fx_ela_chance',
+                         note='JPEG compression error map — forensic heat-vision of edges')
+        self._slider_block(f, 'ELA Blend (0=pure ELA  1=original)',
+                           'fx_ela_blend', 0.0, 1.0, indent=True)
+
+        self._effect_row(f, 'Dtype Reinterpret', 'fx_dtype_corrupt', 'fx_dtype_corrupt_chance',
+                         note='Frame bytes reread as float16 — deterministic VRAM corruption')
+        self._slider_block(f, 'Noise Amount',
+                           'fx_dtype_corrupt_amount', 0.01, 0.4, indent=True)
+
+        self._effect_row(f, 'Spatial Reverb', 'fx_spatial_reverb', 'fx_spatial_reverb_chance',
+                         note='Decaying echo along pixel rows — acoustic reverb applied to light')
+        self._slider_block(f, 'Reverb Decay',
+                           'fx_spatial_reverb_decay', 0.05, 0.45, indent=True)
+
     def _tab_mystery(self, f):
         tk.Label(f, text='[ UNKNOWN PARAMETERS — USE WITH CAUTION ]',
                  bg=C_SILVER, fg=C_DARK_GRAY,
@@ -828,6 +933,10 @@ class MainGUI(tk.Tk):
         # Group: COMPLEX
         body = self._acc_group(cf, 'COMPLEX', open=False)
         self._tab_complex(body)
+
+        # Group: SIGNAL DOMAIN
+        body = self._acc_group(cf, 'SIGNAL DOMAIN', open=False)
+        self._tab_signal_domain(body)
 
         # Group: OVERLAYS
         body = self._acc_group(cf, 'OVERLAYS', open=False)

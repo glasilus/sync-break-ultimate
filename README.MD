@@ -1,7 +1,7 @@
 # Disc VPC 01 — User Manual
 
-**Version:** 0.1.1
-**Requires:** Python 3.10.x · Windows 10/11 (macOS best-effort)
+**Version:** 0.1.2
+**Requires:** Python 3.10.x · Windows 10/11 (macOS, Ubuntu 22.* best-effort)
 
 ---
 
@@ -24,18 +24,23 @@
     - [3.7 Effects — Complex](#37-effects--complex)
     - [3.8 Effects — Degradation](#38-effects--degradation)
     - [3.9 Effects — Overlays and Chroma Key](#39-effects--overlays-and-chroma-key)
-    - [3.10 Export Settings](#310-export-settings)
-    - [3.11 Presets](#311-presets)
-    - [3.12 Render Modes](#312-render-modes)
-    - [3.13 Mystery Panel](#313-mystery-panel)
-    - [3.14 Multiple Video Sources](#314-multiple-video-sources)
-    - [3.15 Silence Treatment](#315-silence-treatment)
+    - [Chroma Key (Green Screen)](#chroma-key-green-screen)
+    - [3.10 Effects — Signal Domain](#310-effects--signal-domain)
+    - [3.11 Export Settings](#311-export-settings)
+    - [3.12 Presets](#312-presets)
+    - [3.13 Render Modes](#313-render-modes)
+    - [3.14 Mystery Panel](#314-mystery-panel)
+    - [3.15 Multiple Video Sources](#315-multiple-video-sources)
+    - [3.16 Silence Treatment](#316-silence-treatment)
   - [4. Disc VPC 01 R-T — Real-Time](#4-disc-vpc-01-r-t--real-time)
     - [4.1 Interface Layout](#41-interface-layout)
     - [4.2 Setup](#42-setup)
     - [4.3 Audio Calibration](#43-audio-calibration)
     - [4.4 Controls and Parameters](#44-controls-and-parameters)
     - [4.5 Effects](#45-effects)
+      - [Core](#core)
+      - [Glitch](#glitch)
+      - [Spatial / Color](#spatial--color)
     - [4.6 Indicators](#46-indicators)
     - [4.7 Fullscreen and Second Monitor](#47-fullscreen-and-second-monitor)
     - [4.8 Keyboard Shortcuts](#48-keyboard-shortcuts)
@@ -99,10 +104,12 @@ The bundle contains:
 
 ```
 Disc-VPC-01-windows/
-├── DiscVPC01.exe       ← offline editor
-├── DiscVPC01-RT.exe    ← real-time
-├── README.MD           ← this document (English)
-└── README_RU.MD        ← this document (Russian)
+├── DiscVPC01.exe            ← offline editor
+├── DiscVPC01-RT.exe         ← real-time
+├── presets/
+│   └── rt_blank.json        ← blank preset for R-T (load via Load Preset)
+├── README.MD                ← this document (English)
+└── README_RU.MD             ← this document (Russian)
 ```
 
 No installation required. Run directly.
@@ -418,7 +425,102 @@ Removes a background colour from each overlay image before compositing, making t
 
 ---
 
-### 3.10 Export Settings
+### 3.10 Effects — Signal Domain
+
+The **SIGNAL DOMAIN** accordion group applies physically unusual transformations to the frame — processes borrowed from audio engineering, information theory, and signal analysis, applied to pixels where they do not belong.
+
+All effects in this group are triggered by audio segment type and intensity, same as all other effects. Each has an enable checkbox, a Chance slider, and one or two parameter sliders.
+
+---
+
+**Resonant Rows**
+
+Applies an IIR bandpass filter along each pixel row, treating the row as a one-dimensional audio signal. The filter creates spatial ringing at vertical edges — not blur, not sharpening, but resonance: a narrow-frequency echo around every boundary. At high Q values, the ringing overtakes the original image.
+
+- *Freq* — centre frequency of the resonance (cycles per pixel). Lower = wider horizontal features resonate. Higher = finer detail resonates.
+- *Q factor* — sharpness of the resonance peak. Low Q = gentle halo. High Q = aggressive oscillating fringe.
+
+---
+
+**Temporal RGB Shift**
+
+The three colour channels are read from different points in time. Red is always the current frame. Green is N/2 frames behind. Blue is N frames behind. Moving objects cast colour-separated shadows across their own history. Stationary images are unaffected.
+
+This is not the same as RGB Shift (which is spatial). This is chromatic temporal aberration.
+
+- *Lag (frames)* — maximum temporal offset for the Blue channel. Scales proportionally with audio intensity.
+
+---
+
+**FFT Phase Corrupt**
+
+Computes the 2D discrete Fourier transform of the frame, adds random noise to the phase of each frequency component while leaving the magnitude untouched, then transforms back. The image loses spatial coherence while preserving its overall brightness distribution — edges dissolve into wave interference patterns.
+
+- *Phase Noise Amount* — amount of phase randomisation (0 = no effect, 1 = full random phase = maximum scramble).
+
+---
+
+**Waveshaper / Tube Sat**
+
+Applies a tanh soft-clipping transfer function to pixel values, identical to tube amplifier saturation in audio production. Mid-range values compress toward the centre; peaks saturate. The result is a characteristic analogue warmth/distortion depending on drive level.
+
+- *Drive* — gain before the clipping stage. Low = gentle saturation. High = hard, coloured distortion.
+
+---
+
+**Histogram Lag**
+
+Matches the colour histogram of the current frame to the histogram of a frame from N frames ago, using per-channel cumulative distribution function remapping. The image retains its structure but borrows its colour palette from the past. When scene changes occur, the current frame takes on the colours of a completely different moment.
+
+- *Palette Lag (frames)* — how far back in time the reference palette is drawn from.
+
+---
+
+**Wrong Chroma Sub (4:1:N)**
+
+Converts the frame to YCrCb colour space, downsamples the Cr and Cb chroma channels by a large factor (2× to 8×), then upsamples them back with nearest-neighbour interpolation. The result: large, blocky colour patches overlaid on sharp luminance detail. This is the visual signature of extreme chroma subsampling — what happens when a bad codec discards too much colour information.
+
+- *Downsample Factor* — how aggressively chroma is reduced. At 2 the effect is mild; at 8 colours appear in large rectangular blocks.
+
+---
+
+**Game of Life Mask**
+
+Binarises the frame at half resolution using a luminance threshold, runs Conway's Game of Life for N iterations using the image content as the initial cell state, then uses the resulting live cells as a corruption mask — XOR-ing noise into those regions.
+
+Brighter image regions tend to produce active cell populations. After several iterations, the pattern develops into Conway gliders, still lifes, and oscillators, creating an organic and semi-predictable corruption structure tied to the image content.
+
+- *Iterations* — how many Game of Life generations to run per frame. More iterations = more evolved, less image-derived pattern.
+
+---
+
+**ELA (Error Level Analysis)**
+
+Re-encodes the current frame as a JPEG at fixed quality, then computes the absolute difference between the original and the re-encoded version, amplified. Regions that were already heavily JPEG-compressed appear dark. Regions with fine detail, sharp edges, or recently edited content appear bright. Applied as a blend layer, this creates a forensic edge map that reveals the spatial structure of image compression.
+
+- *ELA Blend* — 0 = pure ELA map (original image replaced by the error map), 1 = original only. Values between blend the two.
+
+---
+
+**Dtype Reinterpret**
+
+Takes the raw bytes of the frame buffer and reinterprets the first half as 16-bit floating-point values. Small noise is added in the float16 domain. The bytes are then reinterpreted back as unsigned 8-bit integers and reshaped into the frame.
+
+The corruption is not random — it is determined by the specific numerical patterns in the pixel data. Certain pixel value combinations produce NaN or Inf when interpreted as float16, which resolve to specific byte patterns (0 or 255 in uint8), creating structured bright and dark corruptions that are entirely content-dependent.
+
+- *Noise Amount* — standard deviation of the float16-domain noise.
+
+---
+
+**Spatial Reverb**
+
+Constructs a decaying impulse response (a series of diminishing echoes at fixed spatial intervals) and convolves it with each pixel row. The result is a horizontal reverberation — bright pixels produce trailing copies of themselves to the right, decaying in amplitude. This is room acoustic reverb applied to spatial light.
+
+- *Reverb Decay* — rate at which echoes diminish. High values produce longer, louder reverb tails.
+
+---
+
+### 3.11 Export Settings
 
 Located in the **EXPORT** tab.
 
@@ -428,7 +530,7 @@ Located in the **EXPORT** tab.
 
 ---
 
-### 3.11 Presets
+### 3.12 Presets
 
 The **Presets** panel (sidebar) provides named parameter sets for common styles.
 
@@ -453,7 +555,7 @@ Custom presets persist between sessions in `presets.json` in the program directo
 
 ---
 
-### 3.12 Render Modes
+### 3.13 Render Modes
 
 Three render buttons are pinned to the bottom of the sidebar:
 
@@ -479,7 +581,7 @@ The **STOP** button (right panel) interrupts any active render or preview playba
 
 ---
 
-### 3.13 Mystery Panel
+### 3.14 Mystery Panel
 
 The **[ ? ]** tab holds nine sliders. They are named.
 
@@ -487,13 +589,31 @@ The names are not metaphors.
 
 Each one addresses a quantity that exists in the pipeline — a real parameter that shapes the signal in a real way — but the relationship between the name and what it does is not described here, because the description would be inaccurate. Not because we are concealing it. Because the accurate description requires a frame of reference that this document was not written in.
 
-VESSEL feeds. ENTROPY\_7 erodes a boundary that was never supposed to be there. DELTA\_OMEGA governs the speed of a transformation that happens whether you turn it on or not — you are only adjusting how much you see of it. STATIC\_MIND is a gate, but it gates the wrong thing. RESONANCE does not resonate. COLLAPSE initiates. ZERO is not zero. FLESH\_K is what it says. DOT is small.
+The sliders are not independent. What you give to one changes what another is capable of. A position that does nothing alone may do a great deal in the presence of another. The system has memory of the other sliders. So do the effects.
+
+**VESSEL** feeds. It is not empty. What you gave it earlier is still present — weighted, layered behind what you are giving it now. At high values, what was begins to outweigh what is. It speaks to DOT.
+
+**ENTROPY\_7** erodes a boundary that was never supposed to be there. The erosion is not random — it is living. It reads the frame as a condition and continues from it. What VESSEL has accumulated, ENTROPY\_7 grows inside.
+
+**DELTA\_OMEGA** governs the speed of a transformation that happens whether you turn it on or not. You are only adjusting how much of it the rest of the system is allowed to hear.
+
+**STATIC\_MIND** is a gate, but it gates the wrong thing. What passes through at 0 is not what passes through at 1. The transition between them is not a blend. RESONANCE, if present, does something to the structure that STATIC\_MIND was trying to hold in place.
+
+**RESONANCE** does not merely resonate. Rows ring. At sufficient values the image stops being an image and becomes the record of its own frequency. It speaks to COLLAPSE. Together they lower each other's thresholds.
+
+**COLLAPSE** initiates. It works in two directions simultaneously, though the second is not visible until the first is already underway. ZERO changes what it arrives at.
+
+**ZERO** is not zero. It is a seed. The same values, a different ZERO — a different outcome. It also holds a record the original does not know it carries. FLESH\_K amplifies what ZERO reveals.
+
+**FLESH\_K** is what it says. It converts. The conversion is not clean. What exits is not in the same space as what entered. At low values nothing appears to happen. The threshold is not fixed.
+
+**DOT** is small. It separates what arrived together. Three things depart from the same moment but do not arrive at the same time. It lengthens when VESSEL is present.
 
 Move them. Render. Observe what changed. Then move them again.
 
 No combination is wrong. Some combinations are irreversible within the session.
 
-### 3.14 Multiple Video Sources
+### 3.15 Multiple Video Sources
 
 The **Load Source Video** button accepts multiple files simultaneously. Hold `Ctrl` or `Shift` to select several files in the dialog, or drag-select a range.
 
@@ -509,7 +629,7 @@ The sidebar label shows the filename when one file is loaded, and the count (`3 
 
 ---
 
-### 3.15 Silence Treatment
+### 3.16 Silence Treatment
 
 Controls how the engine processes frames during **SILENCE** segments longer than 1 second.
 
@@ -577,9 +697,11 @@ The **Recalibrate** button resets the calibration state and begins a new measure
 
 ### 4.4 Controls and Parameters
 
-**▶ START / ⏹ STOP**
+**START / STOP**
 
 START begins audio capture and video processing. A video file must be loaded first. STOP halts everything. The video source remains loaded after stopping; press START again to resume without reloading files.
+
+**Resolution** selector — choose output resolution before pressing START: `640×360`, `800×450`, `1280×720`, `1920×1080`. Cannot be changed while the engine is running.
 
 ---
 
@@ -597,13 +719,44 @@ A multiplier applied to the auto-calibrated noise gate:
 effective_gate = calibrated_gate × sensitivity
 ```
 
-At `1.0` the gate is at its calibrated value. Increase sensitivity (higher multiplier) to require louder audio before the engine reacts — useful in noisy environments. Decrease (toward `0.2`) to make the engine react to quieter signals.
+At `1.0` the gate is at its calibrated value. Increase to require louder audio before the engine reacts. Decrease toward `0.2` to react to quieter signals.
+
+---
+
+**Master FX** *(0.0 – 1.0)*
+
+Global wet/dry blend for all effects. At `1.0` effects are fully applied. At `0.0` the original unprocessed frame is shown. Useful for fading effects in or out during a performance without toggling individual buttons.
+
+---
+
+**Cut Min s** *(0.0 – 2.0)*
+
+Minimum interval in seconds between video cuts. Prevents strobing caused by rapid consecutive cuts on dense audio. Default `0.3`. Set to `0.0` to disable limiting.
+
+---
+
+**Stage controls**
+
+| Button | Keyboard | Behaviour |
+|---|---|---|
+| **BLACKOUT** | `Space` | Outputs a black frame. The engine keeps running and processing audio — remove blackout to resume instantly. |
+| **FREEZE** | `F` | Holds the last processed frame. Audio analysis continues. |
+| **PANIC** | `P` | Clears all internal effect buffers (datamosh history, ghost trail, feedback accumulation). Use when visuals get stuck. Also turns off Blackout and Freeze if active. |
+
+---
+
+**Presets**
+
+| Button | Action |
+|---|---|
+| **Save Preset** | Saves all current settings (effects, sliders, chroma key, resolution) to a `.json` file. |
+| **Load Preset** | Loads a previously saved `.json` preset. A blank preset with all effects off is included in the release bundle as `presets/rt_blank.json`. |
 
 ---
 
 **Sequential** toggle
 
-When **active** (button appears pressed/highlighted): the engine plays the video sequentially, frame by frame, with no random cuts. Effects still apply.
+When **active** (button highlighted): the engine plays the video sequentially, frame by frame, with no random cuts. Effects still apply.
 
 When **inactive** (default): the engine plays sequentially but cuts to a random frame on audio events (IMPACT, BUILD, DROP, or SUSTAIN with a beat).
 
@@ -611,20 +764,57 @@ When **inactive** (default): the engine plays sequentially but cuts to a random 
 
 ### 4.5 Effects
 
-Each effect is a toggle button. Active effects appear highlighted (dark background, white text). Inactive effects appear in the default raised state.
+Each effect is a toggle button in the Effects panel. Active effects appear highlighted (dark blue background, white text). Inactive effects appear in the default raised state. Effects are organized into three groups.
 
-| Effect | Description |
-|---|---|
-| **RGB Shift** | Shifts red and blue colour channels horizontally, proportional to audio intensity |
-| **Flash** | Flashes the frame toward white or black on transient peaks |
-| **Stutter** | On beat events, blends the current frame with a recent buffered frame, creating a brief visual stutter |
-| **Pixel Sort** | Sorts pixels in horizontal strips by luminance |
-| **Datamosh** | Uses optical flow to warp the previous frame's motion onto the current frame |
-| **Overlays** | Composites random images from the loaded overlay folder onto frames |
+All effects run in **draft mode** — lightweight code paths that preserve responsiveness. Probability of firing is governed by each effect's internal `chance` value (tuned for realtime use) and the **Chaos** slider.
 
-**Ovl Freq** *(0.0 – 1.0)* — probability per frame that an overlay is placed when the audio is active and the Overlays effect is enabled.
+---
 
-**Chroma Key** — background removal for overlay images. Uses the same modes and parameters as §3.9: `none`, `dominant`, `secondary`, `manual`. Tolerance, Edge Softness, and Manual Key Color sliders are available in the Chroma Key section of the Effects panel.
+#### Core
+
+| Effect | Trigger segments | Description |
+|---|---|---|
+| **RGB Shift** | IMPACT, BUILD, NOISE, DROP | Shifts red channel right, blue channel left by an offset scaled to intensity. Produces chromatic aberration. |
+| **Flash** | DROP, IMPACT | Blends the frame toward white or black on sharp transients. |
+| **Stutter** | any (beat events) | Blends the current frame with a randomly chosen recent buffered frame. Creates a momentary freeze/smear. |
+| **Pxl Sort** | NOISE, IMPACT, DROP | Sorts pixel columns within horizontal strips by luminance. |
+| **Datamosh** | NOISE, SUSTAIN, IMPACT, DROP | Computes optical flow between consecutive frames and warps the previous frame forward using that motion, simulating P-frame bleed. Uses `DISOpticalFlow` (ultrafast preset in draft mode). |
+| **Overlays** | any (when active) | Composites a randomly selected image from the overlay folder onto the frame at a random position and scale. |
+
+---
+
+#### Glitch
+
+| Effect | Trigger segments | Description |
+|---|---|---|
+| **Ghost** | SUSTAIN, BUILD | Blends the current frame with the previous frame using `addWeighted`. Leaves a motion trail. |
+| **Scanlines** | SUSTAIN, NOISE | Darkens every N-th horizontal row, simulating a CRT screen. Spacing and darkness scale with intensity. |
+| **Bitcrush** | all | Reduces colour bit-depth by right-shifting and restoring pixel values. Produces posterisation and banding. |
+| **Blk Glitch** | IMPACT, DROP, NOISE | Randomly copies or fills rectangular blocks from other locations on the frame. |
+| **Negative** | IMPACT, DROP, NOISE | Inverts all colour values (`255 − value`) for one frame. |
+| **Clr Bleed** | NOISE, SUSTAIN | Applies a horizontal blur to a single randomly chosen colour channel, producing colour channel smear. |
+| **Interlace** | SUSTAIN | Replaces every odd row with the corresponding row from the previous frame, simulating interlaced video. |
+| **Bad Signal** | DROP, NOISE | Draws vertical noise bars and shifts random rows horizontally, emulating broadcast signal loss. |
+
+---
+
+#### Spatial / Color
+
+| Effect | Trigger segments | Description |
+|---|---|---|
+| **Zoom Glitch** | IMPACT, DROP | Crops a zoomed-in center region and resizes it back to full frame using nearest-neighbour, creating a pixelated punch-in. |
+| **Mosaic** | IMPACT, BUILD | Downscales the frame to a tiny grid and upscales back with nearest-neighbour, creating a blocky mosaic that pulses with intensity. |
+| **PhaseShift** | NOISE, DROP | Divides the frame into horizontal bands and shifts alternating bands left and right. |
+| **Dither** | SILENCE, SUSTAIN | Applies ordered Bayer dithering at reduced colour depth. Produces a retro halftone pattern. |
+| **Feedback** | SUSTAIN, BUILD | Accumulates a weighted blend of current and previous frames, creating a visual feedback/burn-in trail. |
+| **Temp RGB** | all | Assigns R, G, B channels from frames captured at different time offsets, producing chromatic temporal aberration. |
+| **Waveshaper** | all | Applies a tanh soft-clipping waveshaper to pixel values, producing colour saturation and mild overexposure. |
+
+---
+
+**Ovl Freq** *(0.0 – 1.0)* — probability per frame that an overlay is placed when audio is active and Overlays is enabled.
+
+**Chroma Key** — background removal for overlay images. Uses the same modes and parameters as §3.9: `none`, `dominant`, `secondary`, `manual`. Tolerance, Edge Softness, and Manual Key Color sliders are in the Chroma Key sub-section of the Effects panel.
 
 ---
 
@@ -655,7 +845,7 @@ All bars are normalized to the maximum value observed during the session. Bars a
 
 ### 4.7 Fullscreen and Second Monitor
 
-**Fullscreen (F11 or ⛶ button)**
+**Fullscreen (F11 or FS button)**
 
 Opens a separate window covering the full display. The video is scaled to fill the screen. The engine must be running to open fullscreen. Press **ESC** or click the on-screen button to exit.
 
@@ -671,6 +861,12 @@ Both windows are updated on every frame in sync with the main window.
 
 | Key | Action |
 |---|---|
+| `Space` | Toggle Blackout |
+| `F` | Toggle Freeze |
+| `P` | Panic — clear all effect buffers |
+| `R` | Recalibrate noise gate |
+| `1` – `9` | Toggle effects by position (1 = first in list, 9 = ninth) |
+| `0` | Toggle tenth effect |
 | `F11` | Toggle fullscreen output |
 | `ESC` | Exit fullscreen |
 | `F12` | Toggle second monitor output |

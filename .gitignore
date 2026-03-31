@@ -16,6 +16,7 @@ temp_preview.mp4
 *.mp4.ffmpeg.log
 *.avi.ffmpeg.log
 *.json
+!presets/rt_blank.json
 
 *.log
 

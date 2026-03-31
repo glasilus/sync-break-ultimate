@@ -2,6 +2,7 @@
 import os
 import random
 import threading
+import time
 from collections import deque
 
 import cv2
@@ -9,7 +10,13 @@ import numpy as np
 from PIL import Image, ImageSequence
 
 from rt_audio import AudioAnalyzer, RTAudioStats, make_segment_from_stats
-from effects import RGBShiftEffect, PixelSortEffect, DatamoshEffect, FlashEffect, ChromaKeyEffect
+from effects import (
+    RGBShiftEffect, PixelSortEffect, DatamoshEffect, FlashEffect, ChromaKeyEffect,
+    GhostTrailsEffect, ScanLinesEffect, BitcrushEffect, BlockGlitchEffect,
+    NegativeEffect, ColorBleedEffect, InterlaceEffect, BadSignalEffect,
+    ZoomGlitchEffect, MosaicPulseEffect, DitheringEffect, FeedbackLoopEffect,
+    PhaseShiftEffect, TemporalRGBEffect, WaveshaperEffect,
+)
 from analyzer import SegmentType
 
 # Segment types that trigger a video cut (jump to random frame)
@@ -245,10 +252,29 @@ class RealtimeEngine:
             'bass': 0.0, 'mid': 0.0, 'treble': 0.0,
             'flatness': 0.3, 'trend_slope': 0.0, 'rms_mean': 0.001, 'is_noisy': False,
         }
+        # ── Performance / stage controls ─────────────────────────────────────
+        self.blackout = False           # return black frame (engine keeps running)
+        self.freeze   = False           # hold last frame (audio analysis continues)
+        self._last_frame  = None        # frame held during freeze
+        self._last_cut_t  = 0.0        # timestamp of last video cut
+        self._audio_error_count = 0    # consecutive audio read failures
+
         self.settings = {
             'chaos': 0.6,
+            'master_intensity': 1.0,   # 0=dry (no effects) → 1=full wet
+            'min_cut_interval': 0.3,   # seconds between cuts (prevents strobing)
+            # Core
             'fx_rgb': True, 'fx_stutter': True, 'fx_flash': True,
             'fx_pixel_sort': True, 'fx_overlays': True, 'fx_datamosh': True,
+            # Glitch / degradation
+            'fx_ghost': True, 'fx_scanlines': True, 'fx_bitcrush': True,
+            'fx_blockglitch': True, 'fx_negative': True, 'fx_colorbleed': True,
+            'fx_interlace': True, 'fx_badsignal': True,
+            # Spatial / temporal
+            'fx_zoomglitch': True, 'fx_mosaic': True, 'fx_phaseshift': True,
+            # Color / signal
+            'fx_dither': True, 'fx_feedback': True,
+            'fx_temporalrgb': True, 'fx_waveshaper': True,
             'sequential_mode': False, 'overlay_intensity': 0.5,
         }
         # All effect types that should fire when audio is active
@@ -257,10 +283,29 @@ class RealtimeEngine:
             SegmentType.SUSTAIN, SegmentType.NOISE,
         ]
         self._effects = [
-            FlashEffect(enabled=True,    chance=0.5),
-            RGBShiftEffect(enabled=True, chance=0.6),
-            PixelSortEffect(enabled=True, chance=0.5),
-            DatamoshEffect(enabled=True,  chance=0.4),
+            # ── core ───────────────────────────────────────────────
+            FlashEffect(enabled=True,          chance=0.50),
+            RGBShiftEffect(enabled=True,       chance=0.60),
+            PixelSortEffect(enabled=True,      chance=0.50),
+            DatamoshEffect(enabled=True,       chance=0.40),
+            # ── glitch / degradation ───────────────────────────────
+            GhostTrailsEffect(enabled=True,    chance=0.35),
+            ScanLinesEffect(enabled=True,      chance=0.40),
+            BitcrushEffect(enabled=True,       chance=0.25),
+            BlockGlitchEffect(enabled=True,    chance=0.35, block_size=16),
+            NegativeEffect(enabled=True,       chance=0.15),
+            ColorBleedEffect(enabled=True,     chance=0.30),
+            InterlaceEffect(enabled=True,      chance=0.30),
+            BadSignalEffect(enabled=True,      chance=0.30),
+            # ── spatial / temporal ─────────────────────────────────
+            ZoomGlitchEffect(enabled=True,     chance=0.25),
+            MosaicPulseEffect(enabled=True,    chance=0.20),
+            PhaseShiftEffect(enabled=True,     chance=0.30),
+            # ── color / signal ─────────────────────────────────────
+            DitheringEffect(enabled=True,      chance=0.20),
+            FeedbackLoopEffect(enabled=True,   chance=0.30),
+            TemporalRGBEffect(enabled=True,    chance=0.35, lag=6),
+            WaveshaperEffect(enabled=True,     chance=0.30, drive=2.5),
         ]
         for _fx in self._effects:
             _fx.trigger_types = _active_types
@@ -290,6 +335,30 @@ class RealtimeEngine:
         self.running = True
         return True, "Engine started"
 
+    def set_resolution(self, width: int, height: int):
+        """Update output dimensions. Safe to call before start or while stopped."""
+        self.width  = width
+        self.height = height
+        self.video_pool.width  = width
+        self.video_pool.height = height
+        for src in self.video_pool._sources:
+            src._cache = []  # invalidate pre-cached frames
+
+    def reset_effects(self):
+        """Clear all stateful effect buffers — use as panic button."""
+        for fx in self._effects:
+            for attr in ('prev_frame', 'last_frame', 'accumulated', '_held', '_history', 'history'):
+                if hasattr(fx, attr):
+                    val = getattr(fx, attr)
+                    if isinstance(val, list):
+                        val.clear()
+                    else:
+                        setattr(fx, attr, None)
+            if hasattr(fx, '_hold_count'):
+                fx._hold_count = 0
+        self.frame_buffer.clear()
+        self._last_frame = None
+
     def stop(self):
         self.running = False
         self.audio.stop()
@@ -301,6 +370,7 @@ class RealtimeEngine:
         try:
             audio_data = self.audio.analyze_chunk()
             if audio_data:
+                self._audio_error_count = 0
                 self.audio_stats = {
                     'rms':         audio_data.rms,
                     'beat':        audio_data.beat,
@@ -313,6 +383,13 @@ class RealtimeEngine:
                     'is_noisy':    audio_data.is_noisy,
                     'noisy':       audio_data.is_noisy,
                 }
+            elif not self.audio.stream or not self.audio.stream.active:
+                # Audio device dropped — attempt silent reconnect
+                self._audio_error_count += 1
+                if self._audio_error_count > 30:  # ~1 s of missed frames
+                    self._audio_error_count = 0
+                    self.audio.stop()
+                    self.audio.start(None)  # reconnect to default device
 
             # Build segment BEFORE frame selection so cut decision uses it
             _stats = RTAudioStats(
@@ -334,15 +411,24 @@ class RealtimeEngine:
             _calibrated = self.audio._calibration_done
             _active = self.audio_stats['rms'] > self.audio.effective_gate
 
+            # ── Freeze: hold last frame, keep audio alive ───────────────────────
+            if self.freeze and self._last_frame is not None:
+                if self.blackout:
+                    return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                return self._last_frame
+
             # Frame selection:
             #   sequential_mode=True  → always sequential (ambient / no-cut mode)
             #   default               → sequential playback; cut ONLY on audio events
             #                          (IMPACT, BUILD, DROP, or SUSTAIN+beat)
+            _now = time.time()
+            _min_cut = self.settings.get('min_cut_interval', 0.3)
             if self.settings.get('sequential_mode'):
                 frame = self.video_pool.get_sequential_frame()
             else:
                 should_cut = (
                     _calibrated and _active
+                    and (_now - self._last_cut_t) >= _min_cut
                     and (
                         seg.type in _CUT_TYPES
                         or (seg.type == SegmentType.SUSTAIN
@@ -351,20 +437,41 @@ class RealtimeEngine:
                 )
                 if should_cut:
                     frame = self.video_pool.get_random_frame()
+                    self._last_cut_t = _now
                 else:
                     frame = self.video_pool.get_sequential_frame()
 
             self.frame_buffer.append(frame.copy())
 
             if not _calibrated:
+                self._last_frame = frame
                 return frame
 
             if _active:
                 _FX_KEYS = {
-                    'FlashEffect':     'fx_flash',
-                    'RGBShiftEffect':  'fx_rgb',
-                    'PixelSortEffect': 'fx_pixel_sort',
-                    'DatamoshEffect':  'fx_datamosh',
+                    # core
+                    'FlashEffect':        'fx_flash',
+                    'RGBShiftEffect':     'fx_rgb',
+                    'PixelSortEffect':    'fx_pixel_sort',
+                    'DatamoshEffect':     'fx_datamosh',
+                    # glitch / degradation
+                    'GhostTrailsEffect':  'fx_ghost',
+                    'ScanLinesEffect':    'fx_scanlines',
+                    'BitcrushEffect':     'fx_bitcrush',
+                    'BlockGlitchEffect':  'fx_blockglitch',
+                    'NegativeEffect':     'fx_negative',
+                    'ColorBleedEffect':   'fx_colorbleed',
+                    'InterlaceEffect':    'fx_interlace',
+                    'BadSignalEffect':    'fx_badsignal',
+                    # spatial / temporal
+                    'ZoomGlitchEffect':   'fx_zoomglitch',
+                    'MosaicPulseEffect':  'fx_mosaic',
+                    'PhaseShiftEffect':   'fx_phaseshift',
+                    # color / signal
+                    'DitheringEffect':    'fx_dither',
+                    'FeedbackLoopEffect': 'fx_feedback',
+                    'TemporalRGBEffect':  'fx_temporalrgb',
+                    'WaveshaperEffect':   'fx_waveshaper',
                 }
                 for fx in self._effects:
                     key = _FX_KEYS.get(type(fx).__name__, 'fx_unknown')
@@ -413,6 +520,19 @@ class RealtimeEngine:
                             for c in range(3):
                                 roi[:, :, c] = (roi[:, :, c] * (1 - alpha)
                                                 + overlay[:, :, c] * alpha).clip(0, 255).astype(np.uint8)
+
+            # ── Master intensity: blend processed vs. dry original ───────────
+            master = float(self.settings.get('master_intensity', 1.0))
+            if master < 0.999 and self.frame_buffer:
+                dry = self.frame_buffer[-1]
+                if dry.shape == frame.shape:
+                    frame = cv2.addWeighted(frame, master, dry, 1.0 - master, 0)
+
+            self._last_frame = frame
+
+            # ── Blackout: keep engine alive, output nothing ──────────────────
+            if self.blackout:
+                return np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
             return frame
 

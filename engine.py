@@ -30,6 +30,9 @@ from effects import (
     FeedbackLoopEffect, PhaseShiftEffect, MosaicPulseEffect, EchoCompoundEffect,
     KaliMirrorEffect, GlitchCascadeEffect, OverlayEffect, ChromaKeyEffect,
     MysterySection,
+    ResonantRowsEffect, TemporalRGBEffect, FFTPhaseCorruptEffect, WaveshaperEffect,
+    HistoLagEffect, WrongSubsamplingEffect, GameOfLifeEffect, ELAEffect,
+    DtypeReinterpretEffect, SpatialReverbEffect,
 )
 
 from scenedetect import VideoManager, SceneManager
@@ -198,6 +201,58 @@ class BreakcoreEngine:
                 self.log(f"WARNING: No images found in overlay folder: {c['overlay_dir']}")
         if c.get('fx_datamosh'): chain.append(DatamoshEffect(enabled=True, chance=_ch(c.get('fx_datamosh_chance', 0.5))))
         if c.get('fx_ascii'):    chain.append(ASCIIEffect(enabled=True, chance=_ch(c.get('fx_ascii_chance', 0.5)), char_size=c.get('fx_ascii_size', 10), fg_color=tuple(c.get('fx_ascii_fg', [0, 255, 0])), bg_color=tuple(c.get('fx_ascii_bg', [0, 0, 0])), blend=c.get('fx_ascii_blend', 0.0), color_mode=c.get('fx_ascii_color_mode', 'fixed')))
+        # Signal domain effects
+        if c.get('fx_resonant'):
+            chain.append(ResonantRowsEffect(
+                enabled=True, chance=_ch(c.get('fx_resonant_chance', 0.5)),
+                cutoff=float(c.get('fx_resonant_freq', 0.08)),
+                q=float(c.get('fx_resonant_q', 12.0)),
+            ))
+        if c.get('fx_temporal_rgb'):
+            chain.append(TemporalRGBEffect(
+                enabled=True, chance=1.0,
+                lag=max(1, int(c.get('fx_temporal_rgb_lag', 8))),
+            ))
+        if c.get('fx_fft_phase'):
+            chain.append(FFTPhaseCorruptEffect(
+                enabled=True, chance=_ch(c.get('fx_fft_phase_chance', 0.5)),
+                amount=float(c.get('fx_fft_phase_amount', 0.5)),
+            ))
+        if c.get('fx_waveshaper'):
+            chain.append(WaveshaperEffect(
+                enabled=True, chance=_ch(c.get('fx_waveshaper_chance', 0.5)),
+                drive=float(c.get('fx_waveshaper_drive', 3.0)),
+            ))
+        if c.get('fx_histo_lag'):
+            chain.append(HistoLagEffect(
+                enabled=True, chance=1.0,
+                lag_frames=max(2, int(c.get('fx_histo_lag_frames', 30))),
+            ))
+        if c.get('fx_wrong_sub'):
+            chain.append(WrongSubsamplingEffect(
+                enabled=True, chance=_ch(c.get('fx_wrong_sub_chance', 0.5)),
+                factor=max(2, int(c.get('fx_wrong_sub_factor', 4))),
+            ))
+        if c.get('fx_gameoflife'):
+            chain.append(GameOfLifeEffect(
+                enabled=True, chance=_ch(c.get('fx_gameoflife_chance', 0.5)),
+                iterations=max(1, int(c.get('fx_gameoflife_iters', 2))),
+            ))
+        if c.get('fx_ela'):
+            chain.append(ELAEffect(
+                enabled=True, chance=_ch(c.get('fx_ela_chance', 0.5)),
+                blend=float(c.get('fx_ela_blend', 0.5)),
+            ))
+        if c.get('fx_dtype_corrupt'):
+            chain.append(DtypeReinterpretEffect(
+                enabled=True, chance=_ch(c.get('fx_dtype_corrupt_chance', 0.5)),
+                amount=float(c.get('fx_dtype_corrupt_amount', 0.05)),
+            ))
+        if c.get('fx_spatial_reverb'):
+            chain.append(SpatialReverbEffect(
+                enabled=True, chance=_ch(c.get('fx_spatial_reverb_chance', 0.5)),
+                decay=float(c.get('fx_spatial_reverb_decay', 0.15)),
+            ))
         return chain
 
     def _load_overlay_frames(self, folder: str) -> List[np.ndarray]:

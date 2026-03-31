@@ -1,4 +1,5 @@
 """Real-time GUI for the audio-reactive video engine."""
+import json
 import os
 import time
 import tkinter as tk
@@ -43,21 +44,51 @@ def _make_scale(parent, label_text, variable, from_, to, resolution, **kw):
 class RealtimeGUI(tk.Tk):
     """Single-window real-time controller."""
 
-    # Effect keys and display labels
+    # Effect keys and display labels — grouped by type
     _FX_DEFS = [
+        # ── core ───────────────────────
         ('fx_rgb',        'RGB Shift'),
         ('fx_flash',      'Flash'),
         ('fx_stutter',    'Stutter'),
-        ('fx_pixel_sort', 'Pixel Sort'),
+        ('fx_pixel_sort', 'Pxl Sort'),
         ('fx_datamosh',   'Datamosh'),
         ('fx_overlays',   'Overlays'),
+        # ── glitch ─────────────────────
+        ('fx_ghost',      'Ghost'),
+        ('fx_scanlines',  'Scanlines'),
+        ('fx_bitcrush',   'Bitcrush'),
+        ('fx_blockglitch','Blk Glitch'),
+        ('fx_negative',   'Negative'),
+        ('fx_colorbleed', 'Clr Bleed'),
+        ('fx_interlace',  'Interlace'),
+        ('fx_badsignal',  'Bad Signal'),
+        # ── spatial / color ────────────
+        ('fx_zoomglitch', 'Zoom Glitch'),
+        ('fx_mosaic',     'Mosaic'),
+        ('fx_phaseshift', 'PhaseShift'),
+        ('fx_dither',     'Dither'),
+        ('fx_feedback',   'Feedback'),
+        ('fx_temporalrgb','Temp RGB'),
+        ('fx_waveshaper', 'Waveshaper'),
     ]
+
+    # Separator positions (inserted before index i)
+    _FX_SEPARATORS = {6: 'Glitch', 14: 'Spatial / Color'}
+
+    # Available output resolutions
+    _RESOLUTIONS = ['640×360', '800×450', '1280×720', '1920×1080']
+    _RES_MAP = {
+        '640×360':   (640,  360),
+        '800×450':   (800,  450),
+        '1280×720':  (1280, 720),
+        '1920×1080': (1920, 1080),
+    }
 
     def __init__(self):
         super().__init__()
         self.title("Disc VPC 01 R-T")
-        self.geometry("960x560")
-        self.minsize(860, 520)
+        self.geometry("1000x640")
+        self.minsize(900, 580)
         self.configure(bg=C_SILVER)
         self.resizable(True, True)
 
@@ -74,12 +105,30 @@ class RealtimeGUI(tk.Tk):
         self._fx_state: dict[str, bool] = {k: True for k, _ in self._FX_DEFS}
         self._fx_btns:  dict[str, tk.Button] = {}
 
+        # Stage control states
+        self._sequential_on = False
+        self._blackout_on   = False
+        self._freeze_on     = False
+
         self._build_ui()
         self.load_audio_devices()
 
-        self.bind('<F11>', self.toggle_fullscreen)
+        # Keyboard shortcuts
+        self.bind('<F11>',  self.toggle_fullscreen)
         self.bind('<Escape>', self.exit_fullscreen)
-        self.bind('<F12>', self.toggle_second_monitor)
+        self.bind('<F12>',  self.toggle_second_monitor)
+        self.bind('<space>', self._kb_blackout)
+        self.bind('<f>',    self._kb_freeze)
+        self.bind('<F>',    self._kb_freeze)
+        self.bind('<p>',    self._kb_panic)
+        self.bind('<P>',    self._kb_panic)
+        self.bind('<r>',    lambda _: self._recalibrate())
+        self.bind('<R>',    lambda _: self._recalibrate())
+        # 1-9 toggle first 9 effects; 0 toggles 10th
+        for _i in range(9):
+            self.bind(str(_i + 1), lambda e, i=_i: self._kb_toggle_fx(i))
+        self.bind('0', lambda e: self._kb_toggle_fx(9))
+
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -113,6 +162,27 @@ class RealtimeGUI(tk.Tk):
         self.status_bar.pack(side='bottom', fill='x', padx=6, pady=(0, 3))
 
     def _build_left(self, parent):
+        # Scrollable wrapper so Effects block is never clipped
+        canvas = tk.Canvas(parent, bg=C_SILVER, highlightthickness=0)
+        sb = tk.Scrollbar(
+            parent, orient='vertical', command=canvas.yview,
+            bg=C_SILVER, troughcolor='#808080',
+            activebackground='#D6D6D6',
+            relief='raised', bd=1, width=14,
+        )
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        inner = tk.Frame(canvas, bg=C_SILVER)
+        win_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind('<Configure>', lambda e: canvas.configure(
+            scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda e: canvas.itemconfig(
+            win_id, width=e.width))
+        canvas.bind('<MouseWheel>',
+                    lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units'))
+        parent = inner   # all subsequent widgets go into the scrollable frame
+
         # ── Setup ────────────────────────────────────────────────────────────
         sf = tk.LabelFrame(parent, text="Setup", bg=C_SILVER, fg=C_TEXT_BLACK,
                            font=("MS Sans Serif", 9, "bold"), bd=2, relief='groove')
@@ -127,14 +197,20 @@ class RealtimeGUI(tk.Tk):
                                         font='MS_Sans_Serif 9')
         self.audio_combo.pack(side='left', fill='x', expand=True)
         self.audio_combo.bind('<<ComboboxSelected>>', self._on_device_change)
-        _make_button(ar, "↺", self.load_audio_devices, width=2).pack(side='left', padx=(3, 0))
+        _make_button(ar, "R", self.load_audio_devices, width=2).pack(side='left', padx=(3, 0))
 
-        # File buttons row
-        fr = tk.Frame(sf, bg=C_SILVER)
-        fr.pack(fill='x', padx=4, pady=(0, 2))
-        _make_button(fr, "📁 Video",    self.load_video
+        # Resolution + file buttons row
+        rr = tk.Frame(sf, bg=C_SILVER)
+        rr.pack(fill='x', padx=4, pady=(0, 2))
+        self.resolution_var = tk.StringVar(value='640×360')
+        res_combo = ttk.Combobox(rr, textvariable=self.resolution_var,
+                                 values=self._RESOLUTIONS, state='readonly',
+                                 width=9, font='MS_Sans_Serif 9')
+        res_combo.pack(side='left', padx=(0, 3))
+
+        _make_button(rr, "Video",    self.load_video
                  ).pack(side='left', fill='x', expand=True)
-        _make_button(fr, "📁 Overlays", self.load_overlays
+        _make_button(rr, "Overlays", self.load_overlays
                  ).pack(side='left', fill='x', expand=True, padx=(3, 0))
 
         self.file_info_label = tk.Label(sf, text="No video loaded",
@@ -150,30 +226,66 @@ class RealtimeGUI(tk.Tk):
         br = tk.Frame(cf, bg=C_SILVER)
         br.pack(fill='x', padx=4, pady=(4, 3))
         self.start_btn = tk.Button(
-            br, text="▶ START", command=self.start_engine,
+            br, text="START", command=self.start_engine,
             bg=C_SILVER, activebackground='#D6D6D6',
             fg='#000080', font=("MS Sans Serif", 9, "bold"),
             relief='raised', bd=2,
         )
         self.start_btn.pack(side='left', fill='x', expand=True)
         self.stop_btn = tk.Button(
-            br, text="⏹ STOP", command=self.stop_engine,
+            br, text="STOP", command=self.stop_engine,
             bg=C_SILVER, activebackground='#D6D6D6',
             fg='#800000', font=("MS Sans Serif", 9, "bold"),
             relief='raised', bd=2, state='disabled',
         )
         self.stop_btn.pack(side='left', fill='x', expand=True, padx=3)
-        _make_button(br, "⛶", self.toggle_fullscreen, width=2).pack(side='left')
+        _make_button(br, "FS", self.toggle_fullscreen, width=3).pack(side='left')
 
-        self.chaos_var = tk.DoubleVar(value=0.6)
+        self.chaos_var       = tk.DoubleVar(value=0.6)
         self.sensitivity_var = tk.DoubleVar(value=1.0)
-        _make_scale(cf, "Chaos:", self.chaos_var, 0.0, 1.0, 0.05
+        self.master_var      = tk.DoubleVar(value=1.0)
+        self.cut_interval_var = tk.DoubleVar(value=0.3)
+        _make_scale(cf, "Chaos:",       self.chaos_var,        0.0, 1.0, 0.05
                    ).pack(fill='x', padx=4, pady=1)
-        _make_scale(cf, "Sensitivity:", self.sensitivity_var, 0.2, 5.0, 0.1
-                   ).pack(fill='x', padx=4, pady=(1, 4))
+        _make_scale(cf, "Sensitivity:", self.sensitivity_var,  0.2, 5.0, 0.1
+                   ).pack(fill='x', padx=4, pady=1)
+        _make_scale(cf, "Master FX:",   self.master_var,       0.0, 1.0, 0.05
+                   ).pack(fill='x', padx=4, pady=1)
+        _make_scale(cf, "Cut Min s:",   self.cut_interval_var, 0.0, 2.0, 0.05
+                   ).pack(fill='x', padx=4, pady=(1, 3))
 
         self.chaos_var.trace_add('write', self._sync_settings)
         self.sensitivity_var.trace_add('write', self._sync_settings)
+        self.master_var.trace_add('write', self._sync_settings)
+        self.cut_interval_var.trace_add('write', self._sync_settings)
+
+        # ── Stage controls ────────────────────────────────────────────────────
+        sc = tk.Frame(cf, bg=C_SILVER)
+        sc.pack(fill='x', padx=4, pady=(0, 4))
+        sc.columnconfigure(0, weight=1)
+        sc.columnconfigure(1, weight=1)
+        sc.columnconfigure(2, weight=1)
+
+        self.blackout_btn = tk.Button(sc, text="BLACKOUT", font=("MS Sans Serif", 8, "bold"),
+                                      bd=2, command=self._toggle_blackout)
+        self.blackout_btn.grid(row=0, column=0, sticky='ew', padx=2, pady=2)
+        self._apply_fx_style(self.blackout_btn, False)
+
+        self.freeze_btn = tk.Button(sc, text="FREEZE", font=("MS Sans Serif", 8, "bold"),
+                                    bd=2, command=self._toggle_freeze)
+        self.freeze_btn.grid(row=0, column=1, sticky='ew', padx=2, pady=2)
+        self._apply_fx_style(self.freeze_btn, False)
+
+        _make_button(sc, "PANIC", self._panic).grid(
+            row=0, column=2, sticky='ew', padx=2, pady=2)
+
+        # Preset save / load
+        pr = tk.Frame(cf, bg=C_SILVER)
+        pr.pack(fill='x', padx=4, pady=(0, 4))
+        _make_button(pr, "Save Preset", self.save_preset
+                 ).pack(side='left', fill='x', expand=True)
+        _make_button(pr, "Load Preset", self.load_preset
+                 ).pack(side='left', fill='x', expand=True, padx=(3, 0))
 
         # ── Effects ───────────────────────────────────────────────────────────
         ef = tk.LabelFrame(parent, text="Effects", bg=C_SILVER, fg=C_TEXT_BLACK,
@@ -184,13 +296,32 @@ class RealtimeGUI(tk.Tk):
         grid.pack(fill='x', padx=4, pady=(4, 2))
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
+        grid.columnconfigure(2, weight=1)
 
+        _COLS = 3
+        row = 0
+        col = 0
         for i, (key, label) in enumerate(self._FX_DEFS):
-            btn = tk.Button(grid, text=label, font='MS_Sans_Serif 9', bd=2,
+            # Insert group separator label spanning all columns
+            if i in self._FX_SEPARATORS:
+                if col != 0:   # flush current row first
+                    row += 1
+                    col = 0
+                tk.Label(grid, text=self._FX_SEPARATORS[i],
+                         bg=C_SILVER, fg='#555555',
+                         font='MS_Sans_Serif 7', anchor='w',
+                         ).grid(row=row, column=0, columnspan=_COLS,
+                                sticky='w', padx=4, pady=(3, 0))
+                row += 1
+            btn = tk.Button(grid, text=label, font='MS_Sans_Serif 8', bd=2,
                             command=lambda k=key: self._toggle_fx(k))
-            btn.grid(row=i // 2, column=i % 2, sticky='ew', padx=2, pady=2)
+            btn.grid(row=row, column=col, sticky='ew', padx=2, pady=2)
             self._fx_btns[key] = btn
             self._apply_fx_style(btn, self._fx_state[key])
+            col += 1
+            if col >= _COLS:
+                col = 0
+                row += 1
 
         self.overlay_intensity_var = tk.DoubleVar(value=0.5)
         _make_scale(ef, "Ovl Freq:", self.overlay_intensity_var, 0.0, 1.0, 0.05
@@ -238,11 +369,10 @@ class RealtimeGUI(tk.Tk):
         _make_button(bot, "Recalibrate", self._recalibrate
                  ).pack(side='left', fill='x', expand=True, padx=(3, 0))
 
-        self._sequential_on = False
-
     def _build_right(self, parent):
-        # Video output
-        vf = tk.LabelFrame(parent, text="Live Output (640×360)", bg=C_SILVER,
+        # Video output — label updated on resolution change
+        res_label = f"Live Output ({self.resolution_var.get()})"
+        vf = tk.LabelFrame(parent, text=res_label, bg=C_SILVER,
                            fg=C_TEXT_BLACK, font=("MS Sans Serif", 9, "bold"),
                            bd=2, relief='groove')
         vf.pack(fill='both', expand=True)
@@ -261,7 +391,7 @@ class RealtimeGUI(tk.Tk):
         # Use grid so labels share width proportionally and never overflow
         r0.columnconfigure(2, weight=1)  # GATE label expands, others fixed
 
-        self.beat_indicator = tk.Label(r0, text="● BEAT", bg=C_SILVER,
+        self.beat_indicator = tk.Label(r0, text="BEAT", bg=C_SILVER,
                                        fg=C_DARK_GRAY,
                                        font=("MS Sans Serif", 9, "bold"))
         self.beat_indicator.grid(row=0, column=0, sticky='w', padx=(0, 6))
@@ -333,6 +463,43 @@ class RealtimeGUI(tk.Tk):
         self._apply_fx_style(self.seq_btn, self._sequential_on)
         self._sync_settings()
 
+    def _toggle_blackout(self):
+        self._blackout_on = not self._blackout_on
+        self.engine.blackout = self._blackout_on
+        self._apply_fx_style(self.blackout_btn, self._blackout_on)
+        self._log("BLACKOUT ON" if self._blackout_on else "Blackout off")
+
+    def _toggle_freeze(self):
+        self._freeze_on = not self._freeze_on
+        self.engine.freeze = self._freeze_on
+        self._apply_fx_style(self.freeze_btn, self._freeze_on)
+        self._log("FREEZE ON" if self._freeze_on else "Freeze off")
+
+    def _panic(self):
+        """Reset all effect buffers instantly — use when visuals get stuck/corrupt."""
+        self.engine.reset_effects()
+        # Turn off blackout/freeze if on
+        if self._blackout_on:
+            self._toggle_blackout()
+        if self._freeze_on:
+            self._toggle_freeze()
+        self._log("PANIC — all effect buffers cleared")
+
+    def _kb_blackout(self, event=None):
+        self._toggle_blackout()
+
+    def _kb_freeze(self, event=None):
+        self._toggle_freeze()
+
+    def _kb_panic(self, event=None):
+        self._panic()
+
+    def _kb_toggle_fx(self, index: int):
+        """Toggle effect by index in _FX_DEFS (keyboard shortcut)."""
+        if 0 <= index < len(self._FX_DEFS):
+            key = self._FX_DEFS[index][0]
+            self._toggle_fx(key)
+
     # ── Settings sync ─────────────────────────────────────────────────────────
 
     def _sync_chroma(self, *_):
@@ -348,6 +515,8 @@ class RealtimeGUI(tk.Tk):
     def _sync_settings(self, *_):
         self.engine.settings.update({
             'chaos':             self.chaos_var.get(),
+            'master_intensity':  self.master_var.get(),
+            'min_cut_interval':  self.cut_interval_var.get(),
             'overlay_intensity': self.overlay_intensity_var.get(),
             'sequential_mode':   self._sequential_on,
             **self._fx_state,
@@ -431,7 +600,7 @@ class RealtimeGUI(tk.Tk):
                     name = os.path.basename(paths[0])
                 else:
                     name = f"{count} videos loaded"
-                self.file_info_label.config(text=f"✓ {name}", fg=C_TEXT_BLACK)
+                self.file_info_label.config(text=name, fg=C_TEXT_BLACK)
                 self._log(f"Video loaded: {name}")
                 self.status_bar.config(text=f"Video: {name}")
             else:
@@ -448,13 +617,83 @@ class RealtimeGUI(tk.Tk):
             self.engine.load_overlays(folder)
             count = len(self.engine.overlay_mgr.overlays)
             self.file_info_label.config(
-                text=f"✓ video | {count} overlays", fg=C_TEXT_BLACK)
+                text=f"video | {count} overlays", fg=C_TEXT_BLACK)
             self._log(f"Loaded {count} overlays from {os.path.basename(folder)}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
             self._log(f"Overlay error: {e}")
 
     # ── Engine start / stop ───────────────────────────────────────────────────
+
+    def save_preset(self):
+        path = filedialog.asksaveasfilename(
+            title="Save Preset",
+            defaultextension='.json',
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        data = {
+            'fx_state':        self._fx_state,
+            'chaos':           self.chaos_var.get(),
+            'sensitivity':     self.sensitivity_var.get(),
+            'master_intensity':self.master_var.get(),
+            'cut_interval':    self.cut_interval_var.get(),
+            'overlay_intensity':self.overlay_intensity_var.get(),
+            'sequential':      self._sequential_on,
+            'resolution':      self.resolution_var.get(),
+            'ck_mode':         self.ck_mode_var.get(),
+            'ck_tolerance':    self.ck_tol_var.get(),
+            'ck_softness':     self.ck_soft_var.get(),
+            'ck_r':            self.ck_r_var.get(),
+            'ck_g':            self.ck_g_var.get(),
+            'ck_b':            self.ck_b_var.get(),
+        }
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            self._log(f"Preset saved: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save preset: {e}")
+
+    def load_preset(self):
+        path = filedialog.askopenfilename(
+            title="Load Preset",
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load preset: {e}")
+            return
+
+        if 'fx_state' in data:
+            for k, v in data['fx_state'].items():
+                if k in self._fx_state:
+                    self._fx_state[k] = bool(v)
+                    if k in self._fx_btns:
+                        self._apply_fx_style(self._fx_btns[k], self._fx_state[k])
+        if 'chaos'            in data: self.chaos_var.set(data['chaos'])
+        if 'sensitivity'      in data: self.sensitivity_var.set(data['sensitivity'])
+        if 'master_intensity' in data: self.master_var.set(data['master_intensity'])
+        if 'cut_interval'     in data: self.cut_interval_var.set(data['cut_interval'])
+        if 'overlay_intensity'in data: self.overlay_intensity_var.set(data['overlay_intensity'])
+        if 'sequential'       in data:
+            if bool(data['sequential']) != self._sequential_on:
+                self._toggle_sequential()
+        if 'resolution'       in data: self.resolution_var.set(data['resolution'])
+        if 'ck_mode'          in data: self.ck_mode_var.set(data['ck_mode'])
+        if 'ck_tolerance'     in data: self.ck_tol_var.set(data['ck_tolerance'])
+        if 'ck_softness'      in data: self.ck_soft_var.set(data['ck_softness'])
+        if 'ck_r'             in data: self.ck_r_var.set(data['ck_r'])
+        if 'ck_g'             in data: self.ck_g_var.set(data['ck_g'])
+        if 'ck_b'             in data: self.ck_b_var.set(data['ck_b'])
+
+        self._sync_settings()
+        self._log(f"Preset loaded: {os.path.basename(path)}")
 
     def start_engine(self):
         if not self.engine.video_pool.loaded:
@@ -470,6 +709,11 @@ class RealtimeGUI(tk.Tk):
             device_idx = int(device_str.split(":")[0])
         except Exception:
             device_idx = None
+
+        # Apply selected resolution before starting
+        res_str = self.resolution_var.get()
+        w, h = self._RES_MAP.get(res_str, (640, 360))
+        self.engine.set_resolution(w, h)
 
         self._sync_settings()
         success, message = self.engine.start(device_idx)
@@ -497,6 +741,15 @@ class RealtimeGUI(tk.Tk):
         self.start_btn.config(state='normal')
         self.stop_btn.config(state='disabled')
         self.beat_indicator.config(fg=C_DARK_GRAY)
+        # Reset stage controls
+        if self._blackout_on:
+            self._blackout_on = False
+            self.engine.blackout = False
+            self._apply_fx_style(self.blackout_btn, False)
+        if self._freeze_on:
+            self._freeze_on = False
+            self.engine.freeze = False
+            self._apply_fx_style(self.freeze_btn, False)
         self._log("Engine stopped")
         self.status_bar.config(text="Stopped")
         self.exit_fullscreen()

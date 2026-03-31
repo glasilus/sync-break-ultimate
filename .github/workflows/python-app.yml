@@ -82,13 +82,14 @@ jobs:
             dist/DiscVPC01-RT.exe
             README.MD
             README_RU.MD
+            presets/rt_blank.json
 
   # ───────────────────────────────────────────────────────────────────────────
   # 2. Linux  (best-effort)
   # ───────────────────────────────────────────────────────────────────────────
   build-linux:
     name: Build — Linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     continue-on-error: true
 
     steps:
@@ -157,6 +158,7 @@ jobs:
             dist/DiscVPC01-RT
             README.MD
             README_RU.MD
+            presets/rt_blank.json
 
   # ───────────────────────────────────────────────────────────────────────────
   # 3. macOS  (best-effort)
@@ -173,7 +175,8 @@ jobs:
       - name: Install Homebrew dependencies
         run: |
           brew install python-tk@${{ env.PY_VERSION }} portaudio
-          echo "$(brew --prefix python-tk@${{ env.PY_VERSION }})/lib/python${{ env.PY_VERSION }}/site-packages" >> $GITHUB_PATH
+          echo "$(brew --prefix python-tk@${{ env.PY_VERSION }})/lib/python${{ env.PY_VERSION }}/site-packages" >> $GITHUB_ENV
+          echo "PYTHONPATH=$(brew --prefix python-tk@${{ env.PY_VERSION }})/lib/python${{ env.PY_VERSION }}/site-packages:$PYTHONPATH" >> $GITHUB_ENV
 
       - name: Set up Python ${{ env.PY_VERSION }}
         uses: actions/setup-python@v5
@@ -227,6 +230,7 @@ jobs:
             dist/DiscVPC01-RT
             README.MD
             README_RU.MD
+            presets/rt_blank.json
 
   # ───────────────────────────────────────────────────────────────────────────
   # 3. GitHub Release  (only on version tag)
@@ -264,12 +268,12 @@ jobs:
         run: |
           cd windows-files && zip -r ../Disc-VPC-01-windows.zip . && cd ..
           if [ -d linux-files ]; then
-            cd linux-files && chmod +x DiscVPC01 DiscVPC01-RT 2>/dev/null || true
-            zip -r ../Disc-VPC-01-linux.zip . && cd ..
+            chmod +x linux-files/dist/DiscVPC01 linux-files/dist/DiscVPC01-RT 2>/dev/null || true
+            cd linux-files && zip -r ../Disc-VPC-01-linux.zip . && cd ..
           fi
           if [ -d macos-files ]; then
-            cd macos-files && chmod +x DiscVPC01 DiscVPC01-RT 2>/dev/null || true
-            zip -r ../Disc-VPC-01-macos.zip . && cd ..
+            chmod +x macos-files/dist/DiscVPC01 macos-files/dist/DiscVPC01-RT 2>/dev/null || true
+            cd macos-files && zip -r ../Disc-VPC-01-macos.zip . && cd ..
           fi
 
       - name: Publish GitHub Release
