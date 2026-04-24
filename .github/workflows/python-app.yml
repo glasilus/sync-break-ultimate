@@ -226,7 +226,7 @@ jobs:
             portaudio19-dev \
             libsndfile1 \
             ffmpeg \
-            libgl1 libglu1-mesa-dev libegl1-mesa-dev \
+            libgl1 libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
             libx11-dev libxft-dev libxext-dev \
             libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev \
             libwayland-dev libxkbcommon-dev \

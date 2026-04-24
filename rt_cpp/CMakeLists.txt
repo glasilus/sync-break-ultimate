@@ -83,6 +83,9 @@ target_include_directories(DiscVPC01-RT PRIVATE
 
 target_link_directories(DiscVPC01-RT PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
+# Cross-platform OpenGL: OpenGL::GL on Linux/Win, OpenGL framework on macOS
+find_package(OpenGL REQUIRED)
+
 target_link_libraries(DiscVPC01-RT PRIVATE
     glfw
     imgui::imgui
@@ -91,7 +94,7 @@ target_link_libraries(DiscVPC01-RT PRIVATE
     ${FFMPEG_LIBRARIES}
     nlohmann_json::nlohmann_json
     glad::glad
-    opengl32
+    OpenGL::GL
 )
 
 if(WIN32)
