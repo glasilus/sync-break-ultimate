@@ -232,6 +232,8 @@ jobs:
           sudo apt-get install -y \
             python3-tk \
             portaudio19-dev \
+            libjack-jackd2-dev \
+            libasound2-dev \
             libsndfile1 \
             ffmpeg \
             libgl1 libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \

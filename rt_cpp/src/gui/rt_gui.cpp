@@ -12,6 +12,7 @@ namespace fs = std::filesystem;
 
 // ── File dialog (simple Windows API) ─────────────────────────────────────────
 #ifdef _WIN32
+#define NOMINMAX           // windows.h otherwise #defines min/max, breaking std::min
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>
