@@ -107,4 +107,10 @@ if(WIN32)
     endif()
 endif()
 
+# vcpkg's static portaudio on Linux embeds pa_jack.c / pa_alsa.c but does not
+# propagate the transitive JACK / ALSA link deps — resolve them explicitly.
+if(UNIX AND NOT APPLE)
+    target_link_libraries(DiscVPC01-RT PRIVATE jack asound)
+endif()
+
 install(TARGETS DiscVPC01-RT DESTINATION .)
