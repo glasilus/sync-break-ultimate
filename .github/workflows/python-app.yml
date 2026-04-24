@@ -12,6 +12,15 @@ permissions:
 
 env:
   PY_VERSION: "3.10"
+  VCPKG_DEPS: >-
+    glfw3
+    imgui[core,glfw-binding,opengl3-binding]
+    portaudio
+    fftw3
+    ffmpeg[avcodec,avformat,avutil,swscale,swresample]
+    nlohmann-json
+    glad
+    stb
 
 jobs:
 
@@ -31,14 +40,13 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
 
-      - name: Upgrade pip & install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # ── Build: Disc VPC 01 (main editor) ───────────────────────────────────
-      - name: Build DiscVPC01.exe
+      - name: Build DiscVPC01.exe (Python)
         shell: cmd
         run: |
           pyinstaller ^
@@ -56,20 +64,27 @@ jobs:
             --hidden-import=scenedetect.detectors ^
             gui.py
 
-      # ── Build: Disc VPC 01 R-T (real-time, C++) ────────────────────────────
-      - name: Install vcpkg
+      - name: Bootstrap vcpkg
         shell: powershell
         run: |
           git clone https://github.com/microsoft/vcpkg.git vcpkg
           .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
           echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Cache vcpkg packages
+      - name: Cache vcpkg installed (Windows)
         uses: actions/cache@v4
         with:
-          path: vcpkg/packages
-          key: vcpkg-win64-${{ hashFiles('rt_cpp/vcpkg.json') }}
-          restore-keys: vcpkg-win64-
+          path: |
+            vcpkg/installed
+            vcpkg/downloads
+            vcpkg/buildtrees
+          key: vcpkg-win-static-${{ hashFiles('rt_cpp/vcpkg.json') }}
+          restore-keys: vcpkg-win-static-
+
+      - name: Install C++ dependencies (vcpkg)
+        shell: cmd
+        run: |
+          "%VCPKG_ROOT%\vcpkg.exe" install --triplet x64-windows-static ${{ env.VCPKG_DEPS }} || exit /b 1
 
       - name: Build DiscVPC01-RT.exe (C++)
         shell: cmd
@@ -79,6 +94,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake ^
             -DVCPKG_TARGET_TRIPLET=x64-windows-static ^
+            -DVCPKG_MANIFEST_MODE=OFF ^
             -G "Visual Studio 17 2022" -A x64 || exit /b 1
           cmake --build rt_cpp\build --config Release || exit /b 1
           copy /Y rt_cpp\build\Release\DiscVPC01-RT.exe dist\DiscVPC01-RT.exe || exit /b 1
@@ -87,6 +103,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Disc-VPC-01-windows
+          if-no-files-found: error
           path: |
             dist/DiscVPC01.exe
             dist/DiscVPC01-RT.exe
@@ -95,7 +112,102 @@ jobs:
             presets/rt_blank.json
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 2. Linux  (best-effort)
+  # 2. macOS
+  # ───────────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build — macOS
+    runs-on: macos-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system build tools
+        run: |
+          brew install pkg-config autoconf automake libtool nasm ninja
+
+      - name: Set up Python ${{ env.PY_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VERSION }}
+
+      - name: Install Python dependencies
+        run: |
+          brew install python-tk@${{ env.PY_VERSION }} || true
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build DiscVPC01 (Python)
+        run: |
+          pyinstaller \
+            --onefile --windowed --clean --noupx \
+            --name DiscVPC01 \
+            --collect-all cv2 \
+            --collect-all librosa \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all imageio_ffmpeg \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --collect-all scenedetect \
+            --collect-all opensimplex \
+            --hidden-import=scenedetect.detectors \
+            gui.py
+
+      - name: Bootstrap vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git vcpkg
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> $GITHUB_ENV
+          if [ "$(uname -m)" = "arm64" ]; then
+            echo "VCPKG_TRIPLET=arm64-osx" >> $GITHUB_ENV
+          else
+            echo "VCPKG_TRIPLET=x64-osx" >> $GITHUB_ENV
+          fi
+
+      - name: Cache vcpkg installed (macOS)
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg/installed
+            vcpkg/downloads
+            vcpkg/buildtrees
+          key: vcpkg-macos-${{ hashFiles('rt_cpp/vcpkg.json') }}-${{ runner.arch }}
+          restore-keys: vcpkg-macos-
+
+      - name: Install C++ dependencies (vcpkg)
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet "$VCPKG_TRIPLET" ${{ env.VCPKG_DEPS }}
+
+      - name: Build DiscVPC01-RT (C++)
+        run: |
+          mkdir -p dist
+          cmake -S rt_cpp -B rt_cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            -G Ninja
+          cmake --build rt_cpp/build --config Release
+          cp rt_cpp/build/DiscVPC01-RT dist/DiscVPC01-RT
+          chmod +x dist/DiscVPC01-RT
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Disc-VPC-01-macos
+          if-no-files-found: warn
+          path: |
+            dist/DiscVPC01
+            dist/DiscVPC01-RT
+            README.MD
+            README_RU.MD
+            presets/rt_blank.json
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. Linux  (best-effort)
   # ───────────────────────────────────────────────────────────────────────────
   build-linux:
     name: Build — Linux
@@ -114,7 +226,12 @@ jobs:
             portaudio19-dev \
             libsndfile1 \
             ffmpeg \
-            libgl1 \
+            libgl1 libglu1-mesa-dev libegl1-mesa-dev \
+            libx11-dev libxft-dev libxext-dev \
+            libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev \
+            libwayland-dev libxkbcommon-dev \
+            build-essential cmake ninja-build pkg-config \
+            autoconf automake libtool nasm \
             xvfb
 
       - name: Set up Python ${{ env.PY_VERSION }}
@@ -122,13 +239,13 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build DiscVPC01 (Linux)
+      - name: Build DiscVPC01 (Python)
         run: |
           xvfb-run --auto-servernum pyinstaller \
             --onefile --noconsole --clean --noupx \
@@ -145,25 +262,44 @@ jobs:
             --hidden-import=scenedetect.detectors \
             gui.py
 
-      - name: Build DiscVPC01-RT (Linux)
+      - name: Bootstrap vcpkg
         run: |
-          xvfb-run --auto-servernum pyinstaller \
-            --onefile --noconsole --clean --noupx \
-            --name DiscVPC01-RT \
-            --collect-all cv2 \
-            --collect-all scipy \
-            --collect-all soundfile \
-            --collect-all opensimplex \
-            --collect-all librosa \
-            --collect-all numba \
-            --collect-all llvmlite \
-            --hidden-import=sounddevice \
-            rt.py
+          git clone https://github.com/microsoft/vcpkg.git vcpkg
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> $GITHUB_ENV
+
+      - name: Cache vcpkg installed (Linux)
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg/installed
+            vcpkg/downloads
+            vcpkg/buildtrees
+          key: vcpkg-linux-${{ hashFiles('rt_cpp/vcpkg.json') }}
+          restore-keys: vcpkg-linux-
+
+      - name: Install C++ dependencies (vcpkg)
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-linux ${{ env.VCPKG_DEPS }}
+
+      - name: Build DiscVPC01-RT (C++)
+        run: |
+          mkdir -p dist
+          cmake -S rt_cpp -B rt_cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            -G Ninja
+          cmake --build rt_cpp/build --config Release
+          cp rt_cpp/build/DiscVPC01-RT dist/DiscVPC01-RT
+          chmod +x dist/DiscVPC01-RT
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: Disc-VPC-01-linux
+          if-no-files-found: warn
           path: |
             dist/DiscVPC01
             dist/DiscVPC01-RT
@@ -172,83 +308,12 @@ jobs:
             presets/rt_blank.json
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 3. macOS  (best-effort)
-  # ───────────────────────────────────────────────────────────────────────────
-  build-macos:
-    name: Build — macOS
-    runs-on: macos-latest
-    continue-on-error: true   # macOS is secondary; don't fail the whole run
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Homebrew dependencies
-        run: |
-          brew install python-tk@${{ env.PY_VERSION }} portaudio
-          echo "PYTHONPATH=$(brew --prefix python-tk@${{ env.PY_VERSION }})/lib/python${{ env.PY_VERSION }}/site-packages:$PYTHONPATH" >> $GITHUB_ENV
-
-      - name: Set up Python ${{ env.PY_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PY_VERSION }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build DiscVPC01 (macOS app)
-        run: |
-          pyinstaller \
-            --onefile --noconsole --clean --noupx \
-            --name DiscVPC01 \
-            --collect-all cv2 \
-            --collect-all librosa \
-            --collect-all scipy \
-            --collect-all soundfile \
-            --collect-all imageio_ffmpeg \
-            --collect-all numba \
-            --collect-all llvmlite \
-            --collect-all scenedetect \
-            --collect-all opensimplex \
-            --hidden-import=scenedetect.detectors \
-            gui.py
-
-      - name: Build DiscVPC01-RT (macOS app)
-        run: |
-          pyinstaller \
-            --onefile --noconsole --clean --noupx \
-            --name DiscVPC01-RT \
-            --collect-all cv2 \
-            --collect-all scipy \
-            --collect-all soundfile \
-            --collect-all opensimplex \
-            --collect-all librosa \
-            --collect-all numba \
-            --collect-all llvmlite \
-            --hidden-import=sounddevice \
-            rt.py
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Disc-VPC-01-macos
-          path: |
-            dist/DiscVPC01
-            dist/DiscVPC01-RT
-            README.MD
-            README_RU.MD
-            presets/rt_blank.json
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # 3. GitHub Release  (only on version tag)
+  # 4. GitHub Release  (only on version tag)
   # ───────────────────────────────────────────────────────────────────────────
   release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     if: startsWith(github.ref, 'refs/tags/v') && !failure() && !cancelled()
 
     steps:
@@ -258,15 +323,6 @@ jobs:
           name: Disc-VPC-01-windows
           path: windows-files
 
-      # Linux artifact may be absent if that job failed (continue-on-error)
-      - name: Download Linux artifact (if available)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: Disc-VPC-01-linux
-          path: linux-files
-
-      # macOS artifact may be absent if that job failed (continue-on-error)
       - name: Download macOS artifact (if available)
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -274,16 +330,23 @@ jobs:
           name: Disc-VPC-01-macos
           path: macos-files
 
+      - name: Download Linux artifact (if available)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: Disc-VPC-01-linux
+          path: linux-files
+
       - name: Create release ZIPs
         run: |
           cd windows-files && zip -r ../Disc-VPC-01-windows.zip . && cd ..
-          if [ -d linux-files ]; then
-            chmod +x linux-files/dist/DiscVPC01 linux-files/dist/DiscVPC01-RT 2>/dev/null || true
-            cd linux-files && zip -r ../Disc-VPC-01-linux.zip . && cd ..
-          fi
           if [ -d macos-files ]; then
             chmod +x macos-files/dist/DiscVPC01 macos-files/dist/DiscVPC01-RT 2>/dev/null || true
             cd macos-files && zip -r ../Disc-VPC-01-macos.zip . && cd ..
+          fi
+          if [ -d linux-files ]; then
+            chmod +x linux-files/dist/DiscVPC01 linux-files/dist/DiscVPC01-RT 2>/dev/null || true
+            cd linux-files && zip -r ../Disc-VPC-01-linux.zip . && cd ..
           fi
 
       - name: Publish GitHub Release

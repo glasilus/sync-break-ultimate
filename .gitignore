@@ -17,6 +17,9 @@ temp_preview.mp4
 *.avi.ffmpeg.log
 *.json
 !presets/rt_blank.json
+# C++ project manifests must be versioned
+!rt_cpp/vcpkg.json
+!rt_cpp/vcpkg-configuration.json
 
 *.log
 

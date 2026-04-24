@@ -1240,8 +1240,11 @@ class MainGUI(tk.Tk):
         self.var_overlay_blend.set(cfg.get('fx_overlay_blend', 'screen'))
         self.var_overlay_position.set(cfg.get('fx_overlay_position', 'random'))
         self.var_overlay_ck_mode.set(cfg.get('fx_overlay_ck_mode', 'none'))
+        self.var_silence_mode.set(cfg.get('silence_mode', 'dim'))
         self.res_combo.set(cfg.get('resolution', '720p'))
         self.preset_enc_combo.set(cfg.get('export_preset', 'medium'))
+        if hasattr(self, 'fmt_combo') and cfg.get('video_codec'):
+            self.fmt_combo.set(cfg['video_codec'])
         self.log(f"Preset '{name}' loaded.")
 
     def _load_selected_preset(self):
