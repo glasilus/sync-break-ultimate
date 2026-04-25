@@ -70,6 +70,7 @@ set(SOURCES
     src/gui/theme.cpp
     src/gui/font_loader.cpp
     src/gui/output_window.cpp
+    src/gui/win95.cpp
     src/presets/preset_manager.cpp
 )
 

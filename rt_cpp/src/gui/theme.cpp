@@ -10,11 +10,17 @@ void Theme::apply_win95() {
     s.PopupRounding     = 0.f;
     s.ScrollbarRounding = 0.f;
     s.TabRounding       = 0.f;
-    s.WindowBorderSize  = 1.f;
+    s.WindowBorderSize  = 2.f;   // raised-panel look
+    s.ChildBorderSize   = 2.f;
     s.FrameBorderSize   = 1.f;
-    s.FramePadding      = {4, 3};
+    s.PopupBorderSize   = 1.f;
+    s.WindowPadding     = {4, 4};
+    s.FramePadding      = {4, 2};
     s.ItemSpacing       = {4, 4};
+    s.ItemInnerSpacing  = {3, 3};
     s.IndentSpacing     = 16.f;
+    s.ScrollbarSize     = 16.f;  // classic chunky scrollbar
+    s.GrabMinSize       = 12.f;
 
     ImVec4* c = s.Colors;
     // Classic Win95 gray palette

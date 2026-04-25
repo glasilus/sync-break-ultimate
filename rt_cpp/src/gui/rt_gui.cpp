@@ -1,6 +1,7 @@
 #include "rt_gui.h"
 #include "theme.h"
 #include "font_loader.h"
+#include "win95.h"
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -186,16 +187,19 @@ void RtGui::render(EngineSettings& settings, float fps, GLuint display_tex) {
     float ctrl_h = win_h - preview_h - 60.f;
 
     ImGui::BeginChild("##master",  {col_w, ctrl_h}, true);
+    Win95::title_bar("Master");
     draw_master_panel(settings);
     ImGui::EndChild();
 
     ImGui::SameLine();
     ImGui::BeginChild("##effects", {col_w, ctrl_h}, true);
+    Win95::title_bar("Effects");
     draw_effects_panel(settings);
     ImGui::EndChild();
 
     ImGui::SameLine();
     ImGui::BeginChild("##vidaudio", {col_w, ctrl_h}, true);
+    Win95::title_bar("Video / Audio");
     draw_video_panel();
     ImGui::Separator();
     draw_audio_panel(settings);
@@ -203,6 +207,7 @@ void RtGui::render(EngineSettings& settings, float fps, GLuint display_tex) {
 
     ImGui::SameLine();
     ImGui::BeginChild("##ovpreset", {col_w - 4, ctrl_h}, true);
+    Win95::title_bar("Overlays / Presets / Output");
     draw_overlay_panel(settings);
     ImGui::Separator();
     draw_presets_panel(settings);
@@ -210,17 +215,17 @@ void RtGui::render(EngineSettings& settings, float fps, GLuint display_tex) {
     draw_output_panel();
     ImGui::EndChild();
 
-    // ── Bottom bar ───────────────────────────────────────────────────────────
+    // ── Bottom bar: big 3D Win95 transport button + status ───────────────────
     ImGui::Separator();
     if (!running_) {
-        if (ImGui::Button("START")) { want_start_ = true; running_ = true; }
+        if (Win95::button("START", 90.f, 26.f)) { want_start_ = true; running_ = true; }
     } else {
-        if (ImGui::Button("STOP"))  { want_stop_  = true; running_ = false; }
+        if (Win95::button("STOP",  90.f, 26.f)) { want_stop_  = true; running_ = false; }
     }
     ImGui::SameLine();
-    ImGui::Checkbox("Freeze",   &engine_->freeze);
+    ImGui::Checkbox("Freeze",     &engine_->freeze);
     ImGui::SameLine();
-    ImGui::Checkbox("Blackout", &engine_->blackout);
+    ImGui::Checkbox("Blackout",   &engine_->blackout);
     ImGui::SameLine();
     ImGui::Checkbox("Sequential", &settings.sequential);
     ImGui::SameLine();
