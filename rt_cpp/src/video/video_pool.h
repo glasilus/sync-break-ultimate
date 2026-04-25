@@ -14,8 +14,8 @@ public:
     // Call from render thread each frame to pump GPU uploads
     void pump_uploads();
 
-    GLuint get_random_frame(int w, int h);
-    GLuint get_sequential_frame(int w, int h);
+    GLuint get_random_frame(int w, int h, int* out_w = nullptr, int* out_h = nullptr);
+    GLuint get_sequential_frame(int w, int h, int* out_w = nullptr, int* out_h = nullptr);
 
 private:
     std::vector<std::unique_ptr<VideoSource>> sources_;

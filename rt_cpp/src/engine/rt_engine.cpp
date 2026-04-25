@@ -6,16 +6,24 @@
 bool RtEngine::init(int w, int h) {
     width_ = w; height_ = h;
 
-    // Black texture (fallback / blackout)
-    std::vector<uint8_t> black(w * h * 3, 0);
+    // Black texture (fallback / blackout). Always 1×1 — we never sample from
+    // it at a specific resolution, only as a uniform color.
+    uint8_t black_px[3] = {0, 0, 0};
     glGenTextures(1, &black_tex_);
     glBindTexture(GL_TEXTURE_2D, black_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, black.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, black_px);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
 
     return fx_.init(w, h);
+}
+
+void RtEngine::set_canvas_size(int w, int h) {
+    if (w == width_ && h == height_) return;
+    width_ = w; height_ = h;
+    fx_.resize(w, h);
+    last_frame_tex_ = 0;  // dimension-dependent refs invalidated
 }
 
 void RtEngine::destroy() {
@@ -39,27 +47,44 @@ GLuint RtEngine::process_frame(float dt, EngineSettings& settings) {
     pool_.pump_uploads();
 
     GLuint frame_tex = 0;
+    int    frame_w = 0, frame_h = 0;
     if (freeze) {
         frame_tex = last_frame_tex_ ? last_frame_tex_ : black_tex_;
+        frame_w   = last_frame_w_;
+        frame_h   = last_frame_h_;
     } else {
         if (settings.sequential) {
-            frame_tex = pool_.get_sequential_frame(width_, height_);
+            frame_tex = pool_.get_sequential_frame(width_, height_, &frame_w, &frame_h);
         } else {
             auto t    = last_segment_.type;
-            bool reactive = (t == SegmentType::IMPACT ||
-                             t == SegmentType::BUILD   ||
-                             t == SegmentType::DROP    ||
-                             (t == SegmentType::SUSTAIN && last_stats_.beat));
+            // Cut immediately on beat / impact / drop (minimum anti-spam
+            // interval). This removes the up-to-cut_interval latency between
+            // a detected beat and the visual reaction.
+            const float kMinCutMs = 0.030f;  // 30ms anti-spam
+            bool hard_trigger = (t == SegmentType::IMPACT || t == SegmentType::DROP ||
+                                 last_stats_.beat);
+            bool soft_trigger = (t == SegmentType::BUILD ||
+                                 (t == SegmentType::SUSTAIN && last_stats_.beat));
 
-            if (reactive && time_since_cut_ >= settings.cut_interval) {
+            if (hard_trigger && time_since_cut_ >= kMinCutMs) {
                 time_since_cut_ = 0.f;
-                frame_tex = pool_.get_random_frame(width_, height_);
+                frame_tex = pool_.get_random_frame(width_, height_, &frame_w, &frame_h);
+            } else if (soft_trigger && time_since_cut_ >= settings.cut_interval) {
+                time_since_cut_ = 0.f;
+                frame_tex = pool_.get_random_frame(width_, height_, &frame_w, &frame_h);
             } else {
-                frame_tex = pool_.get_sequential_frame(width_, height_);
+                frame_tex = pool_.get_sequential_frame(width_, height_, &frame_w, &frame_h);
             }
         }
-        if (!frame_tex) frame_tex = last_frame_tex_ ? last_frame_tex_ : black_tex_;
-        last_frame_tex_ = frame_tex;
+        if (!frame_tex) {
+            frame_tex = last_frame_tex_ ? last_frame_tex_ : black_tex_;
+            frame_w   = last_frame_w_;
+            frame_h   = last_frame_h_;
+        } else {
+            last_frame_tex_ = frame_tex;
+            last_frame_w_   = frame_w;
+            last_frame_h_   = frame_h;
+        }
     }
 
     // ── Overlay ───────────────────────────────────────────────────────────────
@@ -88,8 +113,9 @@ GLuint RtEngine::process_frame(float dt, EngineSettings& settings) {
     ck.r = settings.ck_r; ck.g = settings.ck_g; ck.b = settings.ck_b;
 
     // ── Apply effects ─────────────────────────────────────────────────────────
+    AspectMode am = (AspectMode)settings.aspect_mode;
     return fx_.apply(
-        frame_tex,
+        frame_tex, frame_w, frame_h, am,
         ov_tex, ov_x, ov_y, ov_w, ov_h, ck,
         settings.overlay_intensity,
         last_segment_,

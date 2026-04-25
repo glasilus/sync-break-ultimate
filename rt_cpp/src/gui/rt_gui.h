@@ -42,6 +42,9 @@ private:
     char        save_name_[64] = {};
     bool        show_save_dlg_ = false;
 
+    // Canvas resolution preset index (into kCanvasPresets)
+    int         canvas_preset_ = 0;
+
     bool want_start_ = false;
     bool want_stop_  = false;
     bool running_    = false;

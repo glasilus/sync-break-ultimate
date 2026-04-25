@@ -30,7 +30,7 @@ set(SHADER_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${SHADER_OUT}")
 
 set(SHADER_FILES
-    passthrough
+    passthrough canvas_place
     rgb_shift flash zoom_glitch mosaic scanlines negative interlace
     ghost_trails feedback_loop vhs_tracking color_bleed dither fisheye
     kali_mirror phase_shift pixel_drift block_glitch bitcrush bad_signal

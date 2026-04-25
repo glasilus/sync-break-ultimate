@@ -42,6 +42,8 @@ struct EffectParams {
     float chance    = 0.5f;
 };
 
+enum class AspectMode { Contain = 0, Cover = 1, Stretch = 2, Native = 3 };
+
 // Ping-pong framebuffer pair for shader passes
 struct FboPair {
     GLuint fbo[2]  = {};
@@ -67,8 +69,12 @@ public:
 
     // Apply all enabled effects. Returns final output GL texture.
     // Call every render frame from the OpenGL thread.
+    // src_w/src_h are the native dimensions of input_tex; used by the
+    // aspect-aware canvas placement pass.
     GLuint apply(
         GLuint              input_tex,
+        int                 src_w, int src_h,
+        AspectMode          aspect,
         GLuint              overlay_tex,
         float               overlay_x, float overlay_y,
         float               overlay_w, float overlay_h,
@@ -110,6 +116,7 @@ private:
 
     // ── Shader programs ───────────────────────────────────────────────────────
     GLuint prog_pass_   = 0;
+    GLuint prog_place_  = 0;   // aspect-aware canvas placement
     GLuint prog_derivwarp_   = 0;
     GLuint prog_flash_       = 0;
     GLuint prog_stutter_     = 0;

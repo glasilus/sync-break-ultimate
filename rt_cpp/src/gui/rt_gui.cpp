@@ -232,15 +232,31 @@ void RtGui::render(EngineSettings& settings, float fps, GLuint display_tex) {
 }
 
 void RtGui::draw_video_preview(GLuint tex, int win_w, int win_h) {
-    ImVec2 sz = {(float)win_w, (float)win_h};
-    if (tex != 0)
-        ImGui::Image((ImTextureID)(intptr_t)tex, sz, {0,1}, {1,0});
-    else {
-        ImGui::Dummy(sz);
-        ImVec2 p = ImGui::GetItemRectMin();
-        ImGui::GetWindowDrawList()->AddRectFilled(p, {p.x+sz.x, p.y+sz.y}, IM_COL32(0,0,0,255));
-        ImGui::GetWindowDrawList()->AddText({p.x+sz.x/2-40, p.y+sz.y/2},
-            IM_COL32(128,128,128,255), "No video loaded");
+    // Preserve the canvas aspect ratio inside the allocated preview rectangle
+    // (letterbox / pillarbox with black borders).
+    int cw = engine_->canvas_width();
+    int ch = engine_->canvas_height();
+    float cA = (cw > 0 && ch > 0) ? (float)cw / (float)ch : 16.f / 9.f;
+    float winA = (float)win_w / (float)std::max(1, win_h);
+
+    float img_w, img_h;
+    if (winA > cA) { img_h = (float)win_h;          img_w = img_h * cA; }
+    else           { img_w = (float)win_w;          img_h = img_w / cA; }
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::Dummy({(float)win_w, (float)win_h});
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin, {origin.x + win_w, origin.y + win_h}, IM_COL32(0,0,0,255));
+
+    ImVec2 img_pos = {origin.x + (win_w - img_w) * 0.5f,
+                      origin.y + (win_h - img_h) * 0.5f};
+    if (tex != 0) {
+        dl->AddImage((ImTextureID)(intptr_t)tex,
+                     img_pos, {img_pos.x + img_w, img_pos.y + img_h},
+                     {0, 1}, {1, 0});
+    } else {
+        dl->AddText({origin.x + win_w * 0.5f - 40, origin.y + win_h * 0.5f},
+                    IM_COL32(128,128,128,255), "No video loaded");
     }
 }
 
@@ -251,6 +267,28 @@ void RtGui::draw_master_panel(EngineSettings& s) {
     ImGui::SliderFloat("Intensity##m", &s.master_intensity, 0.f, 1.f, "%.2f");
     ImGui::SliderFloat("Threshold##m", &s.sensitivity,      0.1f,3.f, "%.2f");
     ImGui::SliderFloat("Cut Interval", &s.cut_interval,     0.05f,2.f,"%.2f");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("CANVAS");
+
+    // Canvas resolution preset
+    int cur_preset = canvas_preset_;
+    const char* cur_label = kCanvasPresets[cur_preset].label;
+    if (ImGui::BeginCombo("Resolution", cur_label)) {
+        for (int i = 0; i < kCanvasPresetCount; ++i) {
+            bool sel = (i == cur_preset);
+            if (ImGui::Selectable(kCanvasPresets[i].label, sel)) {
+                canvas_preset_ = i;
+                engine_->set_canvas_size(kCanvasPresets[i].width,
+                                         kCanvasPresets[i].height);
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // Aspect fit mode
+    static const char* kAspectLabels[] = {"Contain", "Cover", "Stretch", "Native 1:1"};
+    ImGui::Combo("Aspect", &s.aspect_mode, kAspectLabels, 4);
 }
 
 void RtGui::draw_effects_panel(EngineSettings& s) {

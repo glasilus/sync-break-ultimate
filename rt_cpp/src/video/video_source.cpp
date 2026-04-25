@@ -96,23 +96,25 @@ void VideoSource::seek_random() {
     avcodec_flush_buffers(codec_ctx_);
 }
 
-bool VideoSource::decode_next(DecodedFrame& out, int w, int h) {
-    if (!sws_ctx_ || target_w_ != w || target_h_ != h) {
-        if (sws_ctx_) sws_freeContext(sws_ctx_);
+bool VideoSource::decode_next(DecodedFrame& out, int /*w*/, int /*h*/) {
+    // Decode at NATIVE resolution — aspect-aware composition happens on the
+    // GPU in the canvas-placement shader. This avoids per-video rescale on
+    // the CPU and keeps the texture at its true quality.
+    const int nw = codec_ctx_->width, nh = codec_ctx_->height;
+    if (!sws_ctx_) {
         sws_ctx_ = sws_getContext(
-            codec_ctx_->width, codec_ctx_->height, codec_ctx_->pix_fmt,
-            w, h, AV_PIX_FMT_RGB24,
+            nw, nh, codec_ctx_->pix_fmt,
+            nw, nh, AV_PIX_FMT_RGB24,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
-        target_w_ = w; target_h_ = h;
     }
     if (!sws_ctx_) return false;
 
-    out.width  = w;
-    out.height = h;
-    out.pixels.resize(w * h * 3);
+    out.width  = nw;
+    out.height = nh;
+    out.pixels.resize((size_t)nw * nh * 3);
 
     uint8_t* dst_data[4]    = { out.pixels.data(), nullptr, nullptr, nullptr };
-    int      dst_linesize[4] = { w * 3, 0, 0, 0 };
+    int      dst_linesize[4] = { nw * 3, 0, 0, 0 };
 
     AVPacket* pkt = av_packet_alloc();
     bool got_frame = false;
@@ -152,7 +154,6 @@ void VideoSource::decode_thread_fn() {
     while (!stop_thread_.load()) {
         {
             std::unique_lock<std::mutex> lk(queue_mutex_);
-            // Keep up to kTexPoolSize frames decoded ahead
             queue_cv_.wait(lk, [&]{
                 return stop_thread_.load() || (int)ready_queue_.size() < kTexPoolSize;
             });
@@ -160,7 +161,7 @@ void VideoSource::decode_thread_fn() {
         if (stop_thread_.load()) break;
 
         DecodedFrame frame;
-        if (decode_next(frame, target_w_, target_h_)) {
+        if (decode_next(frame, 0, 0)) {
             std::lock_guard<std::mutex> lk(queue_mutex_);
             ready_queue_.push_back(std::move(frame));
             queue_cv_.notify_one();
@@ -169,7 +170,6 @@ void VideoSource::decode_thread_fn() {
 }
 
 void VideoSource::pump_uploads() {
-    // Upload up to 3 pending CPU frames to GPU per render frame
     std::unique_lock<std::mutex> lk(queue_mutex_);
     int uploaded = 0;
     while (!ready_queue_.empty() && uploaded < 3) {
@@ -178,6 +178,8 @@ void VideoSource::pump_uploads() {
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, f.width, f.height, 0,
                      GL_RGB, GL_UNSIGNED_BYTE, f.pixels.data());
+        tex_w_[tex_next_] = f.width;
+        tex_h_[tex_next_] = f.height;
         tex_next_ = (tex_next_ + 1) % kTexPoolSize;
         if (tex_ready_count_ < kTexPoolSize) tex_ready_count_++;
         ready_queue_.pop_front();
@@ -188,19 +190,22 @@ void VideoSource::pump_uploads() {
     queue_cv_.notify_all();
 }
 
-GLuint VideoSource::get_random_frame(int w, int h) {
-    target_w_ = w; target_h_ = h;
+GLuint VideoSource::get_random_frame(int /*w*/, int /*h*/, int* out_w, int* out_h) {
     pump_uploads();
     if (tex_ready_count_ == 0) return 0;
     int idx = rand() % tex_ready_count_;
+    if (out_w) *out_w = tex_w_[idx];
+    if (out_h) *out_h = tex_h_[idx];
     return tex_pool_[idx];
 }
 
-GLuint VideoSource::get_sequential_frame(int w, int h) {
-    target_w_ = w; target_h_ = h;
+GLuint VideoSource::get_sequential_frame(int /*w*/, int /*h*/, int* out_w, int* out_h) {
     pump_uploads();
     if (tex_ready_count_ == 0) return 0;
-    GLuint tex = tex_pool_[seq_idx_ % tex_ready_count_];
-    seq_idx_   = (seq_idx_ + 1) % kTexPoolSize;
+    int idx = seq_idx_ % tex_ready_count_;
+    GLuint tex = tex_pool_[idx];
+    if (out_w) *out_w = tex_w_[idx];
+    if (out_h) *out_h = tex_h_[idx];
+    seq_idx_ = (seq_idx_ + 1) % kTexPoolSize;
     return tex;
 }

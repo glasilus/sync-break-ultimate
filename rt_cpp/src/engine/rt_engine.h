@@ -16,8 +16,22 @@ struct EngineSettings {
     float ck_softness       = 5.f;
     float ck_r = 0.f, ck_g = 255.f, ck_b = 0.f;
     int   ck_mode           = 0;   // 0=none 1=dominant 2=secondary 3=manual
+    int   aspect_mode       = 0;   // AspectMode: 0=Contain 1=Cover 2=Stretch 3=Native
     EffectParams fx[(int)FxId::COUNT];
 };
+
+struct CanvasPreset {
+    const char* label;
+    int         width;
+    int         height;
+};
+// Canvas resolutions exposed to the GUI. Engine defaults to the first one.
+static constexpr CanvasPreset kCanvasPresets[] = {
+    {"1280 x 720  (16:9)",  1280,  720},
+    {"1920 x 1080 (16:9)",  1920, 1080},
+    {"1024 x 768  (4:3)",   1024,  768},
+};
+static constexpr int kCanvasPresetCount = (int)(sizeof(kCanvasPresets) / sizeof(kCanvasPresets[0]));
 
 class RtEngine {
 public:
@@ -26,6 +40,13 @@ public:
 
     bool init(int width, int height);
     void destroy();
+
+    // Reconfigure the internal canvas (FBO) resolution. Safe to call at any
+    // time from the render thread — recreates all ping-pong / history FBOs.
+    void set_canvas_size(int w, int h);
+
+    int canvas_width()  const { return width_; }
+    int canvas_height() const { return height_; }
 
     // Call once per render frame. Returns GL texture to display.
     GLuint process_frame(float dt, EngineSettings& settings);
@@ -48,6 +69,8 @@ private:
 
     GLuint black_tex_      = 0;
     GLuint last_frame_tex_ = 0;
+    int    last_frame_w_   = 0;
+    int    last_frame_h_   = 0;
 
     float  time_since_cut_ = 0.f;
     float  elapsed_time_   = 0.f;

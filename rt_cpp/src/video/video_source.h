@@ -32,10 +32,16 @@ public:
     bool is_open() const { return open_; }
     const std::string& path() const { return path_; }
 
-    // Returns a GL texture ID with a decoded frame (caller must NOT delete)
-    // upload_ctx must be called from the render (OpenGL) thread.
-    GLuint get_random_frame(int target_w, int target_h);
-    GLuint get_sequential_frame(int target_w, int target_h);
+    // Returns a GL texture ID with a decoded frame at NATIVE resolution
+    // (caller must NOT delete). Writes out the texture dimensions through
+    // out_w/out_h if non-null — needed by the canvas-placement shader for
+    // correct aspect handling. The target_w/target_h args are kept for
+    // backwards compatibility but ignored.
+    GLuint get_random_frame(int target_w, int target_h, int* out_w = nullptr, int* out_h = nullptr);
+    GLuint get_sequential_frame(int target_w, int target_h, int* out_w = nullptr, int* out_h = nullptr);
+
+    int native_width()  const { return src_w_; }
+    int native_height() const { return src_h_; }
 
     // Call once per frame from render thread to pump pending GPU uploads
     void pump_uploads();
@@ -60,11 +66,14 @@ private:
     int64_t          duration_ts_      = 0;
     int              src_w_ = 0, src_h_ = 0;   // native video dimensions
 
-    // GL texture pool
+    // GL texture pool — dimensions tracked per-slot because decode runs at
+    // native resolution (which can vary if we ever cache mixed-size frames).
     GLuint tex_pool_[kTexPoolSize] = {};
-    int    tex_next_        = 0;  // next upload slot (circular)
-    int    tex_ready_count_ = 0;  // how many slots filled at least once
-    int    seq_idx_         = 0;  // sequential playback cursor (per-instance)
+    int    tex_w_[kTexPoolSize] = {};
+    int    tex_h_[kTexPoolSize] = {};
+    int    tex_next_        = 0;
+    int    tex_ready_count_ = 0;
+    int    seq_idx_         = 0;
 
     // Background decode thread
     std::thread              decode_thread_;

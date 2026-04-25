@@ -7,6 +7,7 @@
 
 // Embedded shader sources (generated headers on include path via CMake)
 #include "passthrough_frag.h"
+#include "canvas_place_frag.h"
 #include "deriv_warp_frag.h"
 #include "flash_frag.h"
 #include "stutter_frag.h"
@@ -260,6 +261,7 @@ bool EffectChain::init(int w, int h) {
 
     // Compile all programs
     prog_pass_        = compile_program(k_vert, k_passthrough_frag);
+    prog_place_       = compile_program(k_vert, k_canvas_place_frag);
     prog_derivwarp_   = compile_program(k_vert, k_deriv_warp_frag);
     prog_flash_       = compile_program(k_vert, k_flash_frag);
     prog_stutter_     = compile_program(k_vert, k_stutter_frag);
@@ -309,7 +311,7 @@ void EffectChain::destroy() {
     if (ascii_font_tex_) { glDeleteTextures(1, &ascii_font_tex_); ascii_font_tex_ = 0; }
 
     auto del = [](GLuint& p){ if(p){ glDeleteProgram(p); p=0; } };
-    del(prog_pass_); del(prog_derivwarp_); del(prog_flash_);
+    del(prog_pass_); del(prog_place_); del(prog_derivwarp_); del(prog_flash_);
     del(prog_stutter_); del(prog_pixsort_); del(prog_ghost_);
     del(prog_scanlines_); del(prog_bitcrush_); del(prog_blockglitch_);
     del(prog_negative_); del(prog_colorbleed_); del(prog_interlace_);
@@ -392,6 +394,8 @@ static bool fires(float chance) {
 
 GLuint EffectChain::apply(
     GLuint              input_tex,
+    int                 src_w, int src_h,
+    AspectMode          aspect,
     GLuint              overlay_tex,
     float               overlay_x, float overlay_y,
     float               overlay_w, float overlay_h,
@@ -406,8 +410,18 @@ GLuint EffectChain::apply(
     const int W = main_fbo_.width, H = main_fbo_.height;
     const float fi_base = seg.intensity * chaos;  // base intensity [0..1]
 
-    // Upload input into main_fbo write slot, then swap so read=input
-    pass(prog_pass_, input_tex, [](GLuint){});
+    // Place the input onto the canvas with correct aspect handling. If the
+    // caller didn't give us usable dimensions, fall back to a straight blit
+    // (happens for the first frames of playback before any decode completes).
+    if (src_w > 0 && src_h > 0 && input_tex != 0) {
+        pass(prog_place_, input_tex, [&](GLuint p){
+            glUniform2f(glGetUniformLocation(p, "uSrcSize"),    (float)src_w, (float)src_h);
+            glUniform2f(glGetUniformLocation(p, "uCanvasSize"), (float)W,     (float)H);
+            glUniform1i(glGetUniformLocation(p, "uMode"),       (int)aspect);
+        });
+    } else {
+        pass(prog_pass_, input_tex, [](GLuint){});
+    }
 
     // Helper: fire if enabled + probability check
     auto fire = [&](FxId id) -> bool {
