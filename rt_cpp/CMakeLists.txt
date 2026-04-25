@@ -69,6 +69,7 @@ set(SOURCES
     src/gui/rt_gui.cpp
     src/gui/theme.cpp
     src/gui/font_loader.cpp
+    src/gui/output_window.cpp
     src/presets/preset_manager.cpp
 )
 

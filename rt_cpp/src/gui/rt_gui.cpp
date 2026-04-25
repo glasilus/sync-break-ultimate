@@ -206,6 +206,8 @@ void RtGui::render(EngineSettings& settings, float fps, GLuint display_tex) {
     draw_overlay_panel(settings);
     ImGui::Separator();
     draw_presets_panel(settings);
+    ImGui::Separator();
+    draw_output_panel();
     ImGui::EndChild();
 
     // ── Bottom bar ───────────────────────────────────────────────────────────
@@ -387,6 +389,83 @@ void RtGui::draw_overlay_panel(EngineSettings& s) {
             ImGui::ColorEdit3("Key Color", &s.ck_r);
         }
     }
+}
+
+void RtGui::draw_output_panel() {
+    ImGui::TextUnformatted("OUTPUT");
+    ImGui::Separator();
+
+    int mon_count = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&mon_count);
+    if (mon_count <= 0) {
+        ImGui::TextDisabled("(no monitors)");
+        return;
+    }
+
+    // Clamp stored selection
+    if (requested_monitor_ >= mon_count) requested_monitor_ = 0;
+
+    // Build a human-readable label for each monitor
+    char preview[128];
+    const GLFWvidmode* mode = glfwGetVideoMode(monitors[requested_monitor_]);
+    const char* mname = glfwGetMonitorName(monitors[requested_monitor_]);
+    std::snprintf(preview, sizeof(preview), "%d: %s %dx%d",
+                  requested_monitor_,
+                  mname ? mname : "?",
+                  mode ? mode->width  : 0,
+                  mode ? mode->height : 0);
+    if (ImGui::BeginCombo("Monitor", preview)) {
+        for (int i = 0; i < mon_count; ++i) {
+            char label[128];
+            const GLFWvidmode* m = glfwGetVideoMode(monitors[i]);
+            const char* n = glfwGetMonitorName(monitors[i]);
+            std::snprintf(label, sizeof(label), "%d: %s %dx%d",
+                          i, n ? n : "?",
+                          m ? m->width : 0, m ? m->height : 0);
+            bool sel = (i == requested_monitor_);
+            if (ImGui::Selectable(label, sel)) requested_monitor_ = i;
+        }
+        ImGui::EndCombo();
+    }
+
+    if (ImGui::Button("Open Output##ow"))  want_out_open_  = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Close Output##ow")) want_out_close_ = true;
+    ImGui::TextDisabled("(Tab=hide GUI  F11=fs  Esc=close)");
+}
+
+void RtGui::apply_pending_preset(EngineSettings& s) {
+    if (pending_preset_idx_ < 0) return;
+    const auto& paths = presets_.paths();
+    if (pending_preset_idx_ < (int)paths.size()) {
+        presets_.load(paths[pending_preset_idx_], s);
+        preset_idx_ = pending_preset_idx_;
+    }
+    pending_preset_idx_ = -1;
+}
+
+void RtGui::render_bare(GLuint display_tex, int win_w, int win_h) {
+    // Even in bare mode we need to run an ImGui frame (otherwise the GLFW
+    // callbacks installed by imgui_impl_glfw can assert on missing state).
+    // We draw a transparent fullscreen window whose sole content is the
+    // canvas image — no chrome, no buttons.
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize({(float)win_w, (float)win_h});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0,0});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, {0,0,0,1});
+    ImGui::Begin("##bare", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar| ImGuiWindowFlags_NoDecoration);
+    draw_video_preview(display_tex, win_w, win_h);
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
 void RtGui::draw_presets_panel(EngineSettings& s) {

@@ -23,6 +23,20 @@ public:
     // dropped folder contains images, loads them as overlays.
     void handle_drop(int count, const char** paths);
 
+    // Output-window request flags (consumed in main loop).
+    bool want_output_open()          { bool v = want_out_open_;  want_out_open_  = false; return v; }
+    bool want_output_close()         { bool v = want_out_close_; want_out_close_ = false; return v; }
+    int  requested_output_monitor() const { return requested_monitor_; }
+
+    // Keyboard-initiated preset load. The GUI owns the preset list; main
+    // forwards a number key here and we consume it on the next render pass.
+    void request_preset_by_index(int idx) { pending_preset_idx_ = idx; }
+    void apply_pending_preset(EngineSettings& s);
+
+    // Draw only the canvas texture fullscreen (no GUI chrome). Used when
+    // the user toggles Tab to hide the GUI.
+    void render_bare(GLuint display_tex, int win_w, int win_h);
+
 private:
     void draw_master_panel(EngineSettings& s);
     void draw_effects_panel(EngineSettings& s);
@@ -53,4 +67,13 @@ private:
     std::vector<AudioDevice> devices_;
     int  selected_device_ = -1;
     bool devices_dirty_   = true;
+
+    // Output-window controls
+    void draw_output_panel();
+    int  requested_monitor_ = 0;
+    bool want_out_open_     = false;
+    bool want_out_close_    = false;
+
+    // Pending preset load (keyboard shortcut 1..9,0)
+    int  pending_preset_idx_ = -1;
 };
