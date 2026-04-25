@@ -1,4 +1,5 @@
 #include "effect_chain.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
