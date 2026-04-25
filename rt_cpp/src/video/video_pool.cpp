@@ -1,5 +1,6 @@
 #include "video_pool.h"
 #include <algorithm>
+#include <cstdio>
 
 void VideoPool::add_source(const std::string& path) {
     // Avoid duplicates
@@ -8,6 +9,8 @@ void VideoPool::add_source(const std::string& path) {
     if (src->is_open()) {
         paths_.push_back(path);
         sources_.push_back(std::move(src));
+    } else {
+        fprintf(stderr, "[pool] failed to open: %s\n", path.c_str());
     }
 }
 

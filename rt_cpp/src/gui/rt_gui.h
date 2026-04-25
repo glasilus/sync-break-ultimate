@@ -13,7 +13,15 @@ public:
 
     bool want_start()      { bool v = want_start_; want_start_ = false; return v; }
     bool want_stop()       { bool v = want_stop_;  want_stop_  = false; return v; }
-    int  selected_device() const { return selected_device_; }
+    // Real PortAudio device index for the currently selected entry, or -1.
+    int  selected_device() const {
+        if (selected_device_ < 0 || selected_device_ >= (int)devices_.size()) return -1;
+        return devices_[selected_device_].index;
+    }
+
+    // Called by GLFW drop callback (cross-platform). Adds videos and, if a
+    // dropped folder contains images, loads them as overlays.
+    void handle_drop(int count, const char** paths);
 
 private:
     void draw_master_panel(EngineSettings& s);

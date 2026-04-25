@@ -14,7 +14,9 @@ static constexpr float kBeatCooldownMs = 80.f;
 
 struct AudioDevice {
     int         index = -1;
-    std::string name;
+    std::string name;          // UTF-8, may include "[API]" prefix
+    std::string host_api;      // "WASAPI" / "MME" / "CoreAudio" / "ALSA" ...
+    int         host_api_type = 0;  // PaHostApiTypeId value
     bool        is_loopback = false;
 };
 

@@ -58,6 +58,7 @@ private:
     AVFrame*         rgb_frame_ = nullptr;
     int              video_stream_idx_ = -1;
     int64_t          duration_ts_      = 0;
+    int              src_w_ = 0, src_h_ = 0;   // native video dimensions
 
     // GL texture pool
     GLuint tex_pool_[kTexPoolSize] = {};

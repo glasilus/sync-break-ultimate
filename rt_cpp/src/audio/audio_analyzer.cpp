@@ -3,6 +3,60 @@
 #include <cstring>
 #include <algorithm>
 #include <numeric>
+#include <unordered_map>
+#include <cctype>
+
+#if defined(_WIN32)
+#  define NOMINMAX
+#  include <windows.h>
+#endif
+
+// Device names coming from PortAudio MME/DirectSound on Windows are in the
+// current ANSI code page. WASAPI & WDM-KS are already UTF-8. Convert via
+// CP_ACP → UTF-8 when the string contains high bytes that aren't valid UTF-8.
+static std::string to_utf8(const char* raw) {
+    if (!raw) return "";
+#if defined(_WIN32)
+    // Detect whether the string is already valid UTF-8; if so, keep as is.
+    int len = (int)std::strlen(raw);
+    BOOL invalid = FALSE;
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw, len, nullptr, 0);
+    if (wlen > 0 && !invalid) return std::string(raw, len); // valid UTF-8
+    // Otherwise decode as system ANSI → wide → UTF-8
+    wlen = MultiByteToWideChar(CP_ACP, 0, raw, len, nullptr, 0);
+    if (wlen <= 0) return std::string(raw, len);
+    std::wstring w(wlen, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, raw, len, w.data(), wlen);
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
+    std::string u(ulen, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, u.data(), ulen, nullptr, nullptr);
+    return u;
+#else
+    return std::string(raw);
+#endif
+}
+
+// Priority of host APIs for dedup — higher value wins when names collide.
+// Lower latency + better stability → higher score.
+static int host_api_priority(PaHostApiTypeId t) {
+    switch (t) {
+        case paWASAPI:          return 100;
+        case paASIO:            return  95;
+        case paCoreAudio:       return  90;
+        case paJACK:            return  85;
+        case paALSA:            return  80;
+        case paWDMKS:           return  60;
+        case paDirectSound:     return  40;
+        case paMME:             return  20;
+        default:                return   0;
+    }
+}
+
+static std::string lower_ascii(const std::string& s) {
+    std::string o; o.reserve(s.size());
+    for (char c : s) o.push_back((char)std::tolower((unsigned char)c));
+    return o;
+}
 
 AudioAnalyzer::AudioAnalyzer() {
     Pa_Initialize();
@@ -20,22 +74,65 @@ AudioAnalyzer::~AudioAnalyzer() {
 }
 
 std::vector<AudioDevice> AudioAnalyzer::enumerate_devices() {
-    std::vector<AudioDevice> result;
+    // 1) Collect every input-capable device with UTF-8 name + API info.
+    std::vector<AudioDevice> all;
     int count = Pa_GetDeviceCount();
     for (int i = 0; i < count; ++i) {
         const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
-        if (!info || info->maxInputChannels < 1) continue;
+        if (!info) continue;
+        // WASAPI loopback counts as an output device in PortAudio but reports
+        // input channels, so we keep any device with inputs available.
+        if (info->maxInputChannels < 1) continue;
+
         AudioDevice d;
-        d.index = i;
-        d.name  = info->name ? info->name : "(unknown)";
-        // WASAPI loopback devices have "loopback" in name or hostApiType == paWASAPI
+        d.index        = i;
+        d.name         = to_utf8(info->name ? info->name : "(unknown)");
         const PaHostApiInfo* ha = Pa_GetHostApiInfo(info->hostApi);
-        if (ha && ha->type == paWASAPI) {
-            d.is_loopback = (d.name.find("loopback") != std::string::npos ||
-                             d.name.find("Loopback") != std::string::npos);
-        }
-        result.push_back(d);
+        d.host_api     = ha ? to_utf8(ha->name) : "";
+        d.host_api_type = ha ? (int)ha->type : 0;
+
+        std::string lname = lower_ascii(d.name);
+        d.is_loopback =
+            (d.host_api_type == paWASAPI) &&
+            (lname.find("loopback") != std::string::npos);
+
+        all.push_back(std::move(d));
     }
+
+    // 2) Dedup: group by base name (strip " [Loopback]" suffix, lowercase),
+    //    keep the highest-priority host API for each group.
+    struct Best { int idx; int prio; };
+    std::unordered_map<std::string, Best> best;
+    for (int i = 0; i < (int)all.size(); ++i) {
+        const auto& d = all[i];
+        std::string key = lower_ascii(d.name);
+        // Strip the "(loopback)" / "[loopback]" annotations so that a mic
+        // called "Foo" and "Foo (loopback)" aren't merged, but DirectSound
+        // "Foo" and MME "Foo" are.
+        if (d.is_loopback) key += "#lb";
+        int prio = host_api_priority((PaHostApiTypeId)d.host_api_type);
+        auto it = best.find(key);
+        if (it == best.end() || prio > it->second.prio) {
+            best[key] = {i, prio};
+        }
+    }
+
+    // 3) Build final list, annotating the host API so duplicates across
+    //    truly different physical devices remain distinguishable.
+    std::vector<AudioDevice> result;
+    result.reserve(best.size());
+    for (auto& kv : best) {
+        AudioDevice d = all[kv.second.idx];
+        if (!d.host_api.empty())
+            d.name = "[" + d.host_api + "] " + d.name;
+        result.push_back(std::move(d));
+    }
+
+    // 4) Stable ordering: loopbacks last, then alphabetical.
+    std::sort(result.begin(), result.end(), [](const AudioDevice& a, const AudioDevice& b){
+        if (a.is_loopback != b.is_loopback) return !a.is_loopback;
+        return a.name < b.name;
+    });
     return result;
 }
 

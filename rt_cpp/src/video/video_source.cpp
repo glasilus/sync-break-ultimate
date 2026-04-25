@@ -1,7 +1,19 @@
 #include "video_source.h"
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <stdexcept>
+
+extern "C" {
+#include <libavutil/error.h>
+#include <libavutil/log.h>
+}
+
+static void log_av_error(const char* where, int err) {
+    char buf[256] = {};
+    av_strerror(err, buf, sizeof(buf));
+    fprintf(stderr, "[video] %s failed (%d): %s\n", where, err, buf);
+}
 
 VideoSource::VideoSource(const std::string& path) : path_(path) {
     // Create GL textures (must be called from render thread)
@@ -32,25 +44,40 @@ VideoSource::~VideoSource() {
 
 bool VideoSource::open_decoder() {
     fmt_ctx_ = nullptr;
-    if (avformat_open_input(&fmt_ctx_, path_.c_str(), nullptr, nullptr) < 0) return false;
-    if (avformat_find_stream_info(fmt_ctx_, nullptr) < 0) return false;
+    // NOTE: path_ MUST be UTF-8. On Windows, FFmpeg decodes UTF-8 paths via
+    // avutil's wchar helpers; ANSI (CP1251 etc) paths silently fail.
+    int err = avformat_open_input(&fmt_ctx_, path_.c_str(), nullptr, nullptr);
+    if (err < 0) { log_av_error("avformat_open_input", err); return false; }
+
+    err = avformat_find_stream_info(fmt_ctx_, nullptr);
+    if (err < 0) { log_av_error("avformat_find_stream_info", err); return false; }
 
     video_stream_idx_ = av_find_best_stream(fmt_ctx_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (video_stream_idx_ < 0) return false;
+    if (video_stream_idx_ < 0) {
+        fprintf(stderr, "[video] no video stream in %s\n", path_.c_str());
+        return false;
+    }
 
     AVStream* stream = fmt_ctx_->streams[video_stream_idx_];
     duration_ts_     = fmt_ctx_->duration;
+    src_w_           = stream->codecpar->width;
+    src_h_           = stream->codecpar->height;
 
     const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
-    if (!codec) return false;
+    if (!codec) {
+        fprintf(stderr, "[video] no decoder for codec in %s\n", path_.c_str());
+        return false;
+    }
 
     codec_ctx_ = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(codec_ctx_, stream->codecpar);
     codec_ctx_->thread_count = 2;
-    if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) return false;
+    err = avcodec_open2(codec_ctx_, codec, nullptr);
+    if (err < 0) { log_av_error("avcodec_open2", err); return false; }
 
     av_frame_  = av_frame_alloc();
     rgb_frame_ = av_frame_alloc();
+    fprintf(stderr, "[video] opened %s (%dx%d)\n", path_.c_str(), src_w_, src_h_);
     return true;
 }
 

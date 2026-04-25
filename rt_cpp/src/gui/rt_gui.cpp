@@ -1,5 +1,6 @@
 #include "rt_gui.h"
 #include "theme.h"
+#include "font_loader.h"
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -10,48 +11,69 @@
 
 namespace fs = std::filesystem;
 
-// ── File dialog (simple Windows API) ─────────────────────────────────────────
+// ── File dialog (Windows-native, UTF-8) ──────────────────────────────────────
+// On Linux/macOS the primary mechanism is drag-and-drop into the window
+// (GLFW's drop callback already delivers UTF-8 paths cross-platform).
 #ifdef _WIN32
-#define NOMINMAX           // windows.h otherwise #defines min/max, breaking std::min
+#define NOMINMAX
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>
-static std::vector<std::string> open_file_dialog_multi(const char* filter) {
+
+static std::string wide_to_utf8(const wchar_t* w, int wlen = -1) {
+    if (!w) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w, wlen, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string s(wlen < 0 ? len - 1 : len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, wlen, s.data(), len, nullptr, nullptr);
+    return s;
+}
+
+static std::vector<std::string> open_file_dialog_multi(const wchar_t* filter) {
     std::vector<std::string> result;
-    char buf[8192] = {};
-    OPENFILENAMEA ofn{};
-    ofn.lStructSize  = sizeof(ofn);
-    ofn.lpstrFilter  = filter;
-    ofn.lpstrFile    = buf;
-    ofn.nMaxFile     = sizeof(buf);
-    ofn.Flags        = OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
-    if (!GetOpenFileNameA(&ofn)) return result;
-    // Parse multi-select result: dir\0file1\0file2\0\0
-    char* p = buf;
-    std::string dir = p; p += dir.size() + 1;
-    if (*p == '\0') { result.push_back(dir); return result; }
+    wchar_t buf[8192] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile   = buf;
+    ofn.nMaxFile    = sizeof(buf) / sizeof(wchar_t);
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&ofn)) return result;
+    // Multi-select result: dir\0file1\0file2\0\0
+    wchar_t* p = buf;
+    std::wstring wdir = p; p += wdir.size() + 1;
+    std::string dir = wide_to_utf8(wdir.c_str(), (int)wdir.size());
+    if (*p == L'\0') { result.push_back(dir); return result; }
     while (*p) {
-        std::string f = p; p += f.size() + 1;
+        std::wstring wf = p; p += wf.size() + 1;
+        std::string f = wide_to_utf8(wf.c_str(), (int)wf.size());
         result.push_back(dir + "\\" + f);
     }
     return result;
 }
 
 static std::string open_folder_dialog() {
-    char buf[MAX_PATH] = {};
-    BROWSEINFOA bi{};
-    bi.lpszTitle = "Select Overlay Folder";
+    wchar_t buf[MAX_PATH] = {};
+    BROWSEINFOW bi{};
+    bi.lpszTitle = L"Select Folder";
     bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (!pidl) return {};
-    SHGetPathFromIDListA(pidl, buf);
+    SHGetPathFromIDListW(pidl, buf);
     CoTaskMemFree(pidl);
-    return buf;
+    return wide_to_utf8(buf);
 }
 #else
-static std::vector<std::string> open_file_dialog_multi(const char*) { return {}; }
+static std::vector<std::string> open_file_dialog_multi(const wchar_t*) { return {}; }
 static std::string open_folder_dialog() { return {}; }
 #endif
+
+// ── Static drop callback bridge (GLFW gives us a window pointer, not `this`) ─
+static RtGui* g_drop_owner = nullptr;
+static void drop_callback(GLFWwindow* /*w*/, int count, const char** paths) {
+    if (!g_drop_owner) return;
+    g_drop_owner->handle_drop(count, paths);
+}
 
 bool RtGui::init(GLFWwindow* window, RtEngine* engine, const std::string& presets_folder) {
     window_         = window;
@@ -63,10 +85,20 @@ bool RtGui::init(GLFWwindow* window, RtEngine* engine, const std::string& preset
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
 
+    // Load a system font with full Cyrillic glyph coverage BEFORE the GL backend
+    // builds the atlas — otherwise Cyrillic shows as '?'.
+    FontLoader::load_default(14.f);
+
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
     Theme::apply_win95();
+
+    // Cross-platform file ingest: drag-and-drop. GLFW delivers UTF-8 paths on
+    // Win/macOS/Linux, so we don't need any per-OS dialog code for the common
+    // case.
+    g_drop_owner = this;
+    glfwSetDropCallback(window, drop_callback);
 
     presets_.scan_folder(presets_folder_);
     int bi = presets_.blank_index();
@@ -76,9 +108,55 @@ bool RtGui::init(GLFWwindow* window, RtEngine* engine, const std::string& preset
 }
 
 void RtGui::shutdown() {
+    if (g_drop_owner == this) g_drop_owner = nullptr;
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+}
+
+static bool has_ext(const std::string& s, std::initializer_list<const char*> exts) {
+    auto pos = s.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string e = s.substr(pos);
+    for (char& c : e) c = (char)std::tolower((unsigned char)c);
+    for (auto* x : exts) if (e == x) return true;
+    return false;
+}
+
+void RtGui::handle_drop(int count, const char** paths) {
+    static const std::initializer_list<const char*> kVideoExts =
+        {".mp4",".avi",".mov",".mkv",".mpg",".mpeg",".wmv",".webm",".m4v",".flv"};
+    static const std::initializer_list<const char*> kImageExts =
+        {".png",".jpg",".jpeg",".bmp",".gif",".tga"};
+
+    bool any_image_folder = false;
+    for (int i = 0; i < count; ++i) {
+        std::error_code ec;
+        fs::path p = fs::u8path(paths[i]);
+        if (fs::is_directory(p, ec)) {
+            // Folder: scan for videos AND check if it contains any images
+            // (treat image-bearing folder as overlay folder).
+            bool has_image = false;
+            for (auto& it : fs::recursive_directory_iterator(p, ec)) {
+                if (!it.is_regular_file(ec)) continue;
+                std::string sp = it.path().string();
+                if (has_ext(sp, kVideoExts)) {
+                    engine_->video().add_source(sp);
+                } else if (has_ext(sp, kImageExts)) {
+                    has_image = true;
+                }
+            }
+            if (has_image && !any_image_folder) {
+                engine_->overlays().load_folder(p.string());
+                any_image_folder = true;
+            }
+        } else if (fs::is_regular_file(p, ec)) {
+            std::string sp = p.string();
+            if (has_ext(sp, kVideoExts)) {
+                engine_->video().add_source(sp);
+            }
+        }
+    }
 }
 
 void RtGui::render(EngineSettings& settings, float fps, GLuint display_tex) {
@@ -198,12 +276,13 @@ void RtGui::draw_video_panel() {
 
     if (ImGui::Button("Add Videos")) {
         auto files = open_file_dialog_multi(
-            "Video Files\0*.mp4;*.avi;*.mov;*.mkv;*.mpg;*.mpeg;*.wmv\0All\0*.*\0\0");
+            L"Video Files\0*.mp4;*.avi;*.mov;*.mkv;*.mpg;*.mpeg;*.wmv;*.webm\0All\0*.*\0\0");
         for (auto& f : files)
             engine_->video().add_source(f);
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear")) engine_->video().clear();
+    ImGui::TextDisabled("(drag files/folders into window)");
 
     const auto& paths = engine_->video().paths();
     ImGui::BeginChild("##vlist", {0, 80}, false);
