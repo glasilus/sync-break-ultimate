@@ -44,7 +44,11 @@ GLuint RtEngine::process_frame(float dt, EngineSettings& settings) {
     if (blackout) return black_tex_;
 
     // ── Video frame selection ─────────────────────────────────────────────────
-    pool_.pump_uploads();
+    // Skip GPU uploads while frozen — otherwise the decoder keeps overwriting
+    // the textures that last_frame_tex_ points to, and the "frozen" image
+    // visibly drifts. Decoder thread will block on the queue when its CPU
+    // buffer fills (~0.1 sec of slack), which is fine.
+    if (!freeze) pool_.pump_uploads();
 
     GLuint frame_tex = 0;
     int    frame_w = 0, frame_h = 0;
@@ -52,30 +56,33 @@ GLuint RtEngine::process_frame(float dt, EngineSettings& settings) {
         frame_tex = last_frame_tex_ ? last_frame_tex_ : black_tex_;
         frame_w   = last_frame_w_;
         frame_h   = last_frame_h_;
+    } else if (settings.cut_mode == 0) {
+        // Continuous mode: linear playback of one source, no cuts. Effects
+        // still react to audio. This is what most VJs want when the music
+        // has no clear beat or when they want a steady visual base.
+        frame_tex = pool_.get_sequential_frame(width_, height_, &frame_w, &frame_h);
     } else {
-        if (settings.sequential) {
-            frame_tex = pool_.get_sequential_frame(width_, height_, &frame_w, &frame_h);
-        } else {
-            auto t    = last_segment_.type;
-            // Cut immediately on beat / impact / drop (minimum anti-spam
-            // interval). This removes the up-to-cut_interval latency between
-            // a detected beat and the visual reaction.
-            const float kMinCutMs = 0.030f;  // 30ms anti-spam
-            bool hard_trigger = (t == SegmentType::IMPACT || t == SegmentType::DROP ||
-                                 last_stats_.beat);
-            bool soft_trigger = (t == SegmentType::BUILD ||
-                                 (t == SegmentType::SUSTAIN && last_stats_.beat));
+        // Cut mode: random cuts on beats / impacts / drops. cut_interval
+        // gates softer (build / sustain) cuts so they don't feel frantic.
+        auto t = last_segment_.type;
+        const float kMinCutMs = 0.030f;  // 30ms hard-trigger anti-spam
+        bool hard_trigger = (t == SegmentType::IMPACT || t == SegmentType::DROP ||
+                             last_stats_.beat);
+        bool soft_trigger = (t == SegmentType::BUILD ||
+                             (t == SegmentType::SUSTAIN && last_stats_.beat));
 
-            if (hard_trigger && time_since_cut_ >= kMinCutMs) {
-                time_since_cut_ = 0.f;
-                frame_tex = pool_.get_random_frame(width_, height_, &frame_w, &frame_h);
-            } else if (soft_trigger && time_since_cut_ >= settings.cut_interval) {
-                time_since_cut_ = 0.f;
-                frame_tex = pool_.get_random_frame(width_, height_, &frame_w, &frame_h);
-            } else {
-                frame_tex = pool_.get_sequential_frame(width_, height_, &frame_w, &frame_h);
-            }
+        if (hard_trigger && time_since_cut_ >= kMinCutMs) {
+            time_since_cut_ = 0.f;
+            frame_tex = pool_.get_random_frame(width_, height_, &frame_w, &frame_h);
+        } else if (soft_trigger && time_since_cut_ >= settings.cut_interval) {
+            time_since_cut_ = 0.f;
+            frame_tex = pool_.get_random_frame(width_, height_, &frame_w, &frame_h);
+        } else {
+            frame_tex = pool_.get_sequential_frame(width_, height_, &frame_w, &frame_h);
         }
+    }
+
+    if (!freeze) {
         if (!frame_tex) {
             frame_tex = last_frame_tex_ ? last_frame_tex_ : black_tex_;
             frame_w   = last_frame_w_;

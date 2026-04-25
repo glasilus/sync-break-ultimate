@@ -14,7 +14,11 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-static constexpr int kTexPoolSize = 30;
+// Pool size = max decoded frames in flight per source. 12 ≈ 0.4 sec at
+// 30 fps, plenty of slack for the random-cut frame picker. Larger values
+// just waste VRAM and CPU memory without improving cut variety
+// perceptibly (consecutive frames of the same shot look ~identical).
+static constexpr int kTexPoolSize = 12;
 
 // One decoded frame stored in CPU memory (RGB24, ready to upload)
 struct DecodedFrame {

@@ -45,6 +45,19 @@ void main() {
     vec2 r = vec2(fbm(vUV * 3.0 + 4.0*q + vec2(1.7, 9.2) + 0.15*uTime),
                   fbm(vUV * 3.0 + 4.0*q + vec2(8.3, 2.8) + 0.126*uTime));
 
-    vec2 disp = r * uIntensity * 0.12;
-    FragColor  = texture(uTex, vUV + disp);
+    // Displacement scales aggressively: 0.40 max UV offset + a non-linear
+    // boost so even moderate intensity produces a clearly visible warp.
+    // Pure r is in roughly [-1, 1]; 0.40 means up to 40 % of the canvas
+    // is displaced when fully driven.
+    float strength = uIntensity * uIntensity * 0.30 + uIntensity * 0.15;
+    vec2  disp     = r * strength;
+
+    // Slight chromatic split on the warp amplifies the "melting" feel
+    // without doubling the cost (we stay at a single dependent fetch per
+    // channel).
+    float ca = uIntensity * 0.012;
+    float cr = texture(uTex, vUV + disp + vec2( ca, 0.0)).r;
+    float cg = texture(uTex, vUV + disp).g;
+    float cb = texture(uTex, vUV + disp + vec2(-ca, 0.0)).b;
+    FragColor = vec4(cr, cg, cb, 1.0);
 }

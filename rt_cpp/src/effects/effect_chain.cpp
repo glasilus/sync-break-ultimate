@@ -408,7 +408,20 @@ GLuint EffectChain::apply(
     EffectParams        params[(int)FxId::COUNT])
 {
     const int W = main_fbo_.width, H = main_fbo_.height;
-    const float fi_base = seg.intensity * chaos;  // base intensity [0..1]
+
+    // Effect intensity model (rebalanced):
+    //   - sqrt curve on segment intensity boosts low values: SUSTAIN/NOISE
+    //     passages no longer flatten effects to ~10 % strength.
+    //   - chaos and master_intensity both scale the result so cranking
+    //     either dial visibly increases effect aggression.
+    //   - A floor of 0.25 keeps effects visible during silence/SUSTAIN if
+    //     they fired (their `chance` already gates how often they appear).
+    //   - Scale of 1.4 lets segment+chaos+master saturate to 1.0 well
+    //     before all dials are at max, which matches the "0..1 = fully
+    //     applied" contract that shaders expect.
+    const float seg_boost   = std::sqrt(std::clamp(seg.intensity, 0.f, 1.f));
+    const float drive       = std::clamp(chaos * (0.6f + 0.4f * master_intensity), 0.f, 1.f);
+    const float fi_base     = std::clamp(0.25f + 1.4f * drive * seg_boost, 0.f, 1.f);
 
     // Place the input onto the canvas with correct aspect handling. If we
     // don't have usable dimensions yet (no decoded frame this tick) or the

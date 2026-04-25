@@ -99,6 +99,9 @@ static void key_callback(GLFWwindow* w, int key, int /*sc*/, int action, int mod
             }
             case GLFW_KEY_B: app->engine->blackout = !app->engine->blackout; return;
             case GLFW_KEY_F: app->engine->freeze   = !app->engine->freeze;   return;
+            case GLFW_KEY_M:
+                app->settings->cut_mode = app->settings->cut_mode ? 0 : 1;
+                return;
             case GLFW_KEY_TAB: app->show_gui = !app->show_gui; return;
             case GLFW_KEY_F11: toggle_fullscreen_control(app); return;
             // Preset by number
@@ -149,7 +152,7 @@ int main() {
     // recoverable after a crash. Logs go next to the working directory.
     Log::init();
     fprintf(stderr, "Disc VPC 01 — Realtime  (C++ edition)\n");
-    fprintf(stderr, "Keybindings: Space=start/stop  B=blackout  F=freeze  Tab=gui  F11=fullscreen\n");
+    fprintf(stderr, "Keybindings: Space=start/stop  B=blackout  F=freeze  M=mode  Tab=gui  F11=fullscreen\n");
     fprintf(stderr, "  1-9,0=presets   Q-P=toggle fx 0..9   [ ]=chaos   , .=cut interval\n");
     fprintf(stderr, "  Shift+O=close output   Esc=close output / exit\n\n");
 

@@ -11,7 +11,11 @@ struct EngineSettings {
     float master_intensity  = 1.0f;
     float cut_interval      = 0.3f;
     float overlay_intensity = 0.0f;
-    bool  sequential        = false;
+    // Frame-selection policy:
+    //   0 = Continuous — linear playback through one source, effects only.
+    //   1 = Cut        — random cuts on beats / impacts / drops.
+    int   cut_mode          = 1;
+    bool  sequential        = false;  // legacy; preserved for old presets
     float ck_tolerance      = 30.f;
     float ck_softness       = 5.f;
     float ck_r = 0.f, ck_g = 255.f, ck_b = 0.f;

@@ -291,7 +291,9 @@ void RtGui::draw_transport(EngineSettings& s, float fps) {
     ImGui::EndGroup();
     ImGui::SameLine();
     ImGui::BeginGroup();
-    ImGui::Checkbox("Sequential##tr", &s.sequential);
+    static const char* kCutLabels[] = {"Continuous", "Cut on beat"};
+    ImGui::SetNextItemWidth(120.f);
+    ImGui::Combo("Mode##tr", &s.cut_mode, kCutLabels, 2);
     ImGui::Text("FPS: %.0f", fps);
     ImGui::EndGroup();
 

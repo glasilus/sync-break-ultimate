@@ -203,11 +203,22 @@ void VideoSource::pump_uploads() {
         glBindTexture(GL_TEXTURE_2D, tex);
         // RGB rows of arbitrary width may not be 4-byte aligned; tell GL.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, f.width, f.height, 0,
-                     GL_RGB, GL_UNSIGNED_BYTE, f.pixels.data());
+        // After the first frame fills a slot, subsequent uploads of the
+        // same dimensions go through glTexSubImage2D which just streams
+        // pixels into existing storage. glTexImage2D re-allocates GPU
+        // storage every call, fragmenting driver memory and starving the
+        // render loop on lower-end hardware.
+        if (tex_w_[tex_next_] == f.width && tex_h_[tex_next_] == f.height) {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                            f.width, f.height, GL_RGB, GL_UNSIGNED_BYTE,
+                            f.pixels.data());
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, f.width, f.height, 0,
+                         GL_RGB, GL_UNSIGNED_BYTE, f.pixels.data());
+            tex_w_[tex_next_] = f.width;
+            tex_h_[tex_next_] = f.height;
+        }
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        tex_w_[tex_next_] = f.width;
-        tex_h_[tex_next_] = f.height;
         if (tex_ready_count_ == 0) {
             fprintf(stderr, "[video] first GPU upload: %dx%d (path=%s)\n",
                     f.width, f.height, path_.c_str());
