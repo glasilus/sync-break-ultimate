@@ -104,14 +104,33 @@ static void key_callback(GLFWwindow* w, int key, int /*sc*/, int action, int mod
                 return;
             case GLFW_KEY_TAB: app->show_gui = !app->show_gui; return;
             case GLFW_KEY_F11: toggle_fullscreen_control(app); return;
-            // Preset by number
+            // Number row: pick active video (1..9 → slot 0..8, 0 → slot 9).
+            // Shift+number loads a preset instead. Pressing the active
+            // video's number again releases the focus back to "all videos".
             case GLFW_KEY_1: case GLFW_KEY_2: case GLFW_KEY_3:
             case GLFW_KEY_4: case GLFW_KEY_5: case GLFW_KEY_6:
-            case GLFW_KEY_7: case GLFW_KEY_8: case GLFW_KEY_9:
-                app->gui->request_preset_by_index(key - GLFW_KEY_1);
+            case GLFW_KEY_7: case GLFW_KEY_8: case GLFW_KEY_9: {
+                int idx = key - GLFW_KEY_1;
+                if (mods & GLFW_MOD_SHIFT) {
+                    app->gui->request_preset_by_index(idx);
+                } else {
+                    auto& pool = app->engine->video();
+                    pool.set_active(pool.active() == idx ? -1 : idx);
+                }
                 return;
-            case GLFW_KEY_0:
-                app->gui->request_preset_by_index(9);
+            }
+            case GLFW_KEY_0: {
+                if (mods & GLFW_MOD_SHIFT) {
+                    app->gui->request_preset_by_index(9);
+                } else {
+                    auto& pool = app->engine->video();
+                    pool.set_active(pool.active() == 9 ? -1 : 9);
+                }
+                return;
+            }
+            // Backtick / grave: explicit "release active video".
+            case GLFW_KEY_GRAVE_ACCENT:
+                app->engine->video().set_active(-1);
                 return;
             // FX toggle row 0..9 on Q W E R T Y U I O P
             case GLFW_KEY_Q: toggle_effect(app->settings, 0); return;
@@ -153,8 +172,9 @@ int main() {
     Log::init();
     fprintf(stderr, "Disc VPC 01 — Realtime  (C++ edition)\n");
     fprintf(stderr, "Keybindings: Space=start/stop  B=blackout  F=freeze  M=mode  Tab=gui  F11=fullscreen\n");
-    fprintf(stderr, "  1-9,0=presets   Q-P=toggle fx 0..9   [ ]=chaos   , .=cut interval\n");
-    fprintf(stderr, "  Shift+O=close output   Esc=close output / exit\n\n");
+    fprintf(stderr, "  1..9,0 = active video (` = release)   Shift+1..0 = load preset\n");
+    fprintf(stderr, "  Q..P = toggle fx 0..9   [ ] = chaos   , . = cut interval\n");
+    fprintf(stderr, "  Shift+O = close output   Esc = close output / exit\n\n");
 
     glfwSetErrorCallback(glfw_error_cb);
     if (!glfwInit()) { fprintf(stderr, "GLFW init failed\n"); return 1; }

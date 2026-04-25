@@ -325,6 +325,19 @@ void RtGui::draw_transport(EngineSettings& s, float fps) {
             engine_->audio().callback_count(),
             engine_->audio().sample_rate());
     }
+
+    // Active-video readout. Shows the keyboard-slot number so the binding
+    // is self-documenting during a set.
+    int act = engine_->video().active();
+    int total = engine_->video().size();
+    if (total == 0) {
+        ImGui::TextDisabled("Video: (none loaded)");
+    } else if (act < 0) {
+        ImGui::TextDisabled("Video: pool (%d files)   1..0 = focus", total);
+    } else {
+        ImGui::Text("Video: #%d of %d   %d=release",
+                    act + 1, total, (act + 1) % 10);
+    }
 }
 
 void RtGui::draw_master_panel(EngineSettings& s) {
@@ -389,16 +402,34 @@ void RtGui::draw_video_panel() {
     if (ImGui::Button("Clear")) engine_->video().clear();
     ImGui::TextDisabled("(drag files/folders into window)");
 
-    const auto& paths = engine_->video().paths();
-    ImGui::BeginChild("##vlist", {0, 80}, false);
-    for (auto& p : paths) {
-        // CRITICAL: fs::path(p) on Windows interprets `p` as the system
-        // ANSI code page, so feeding it UTF-8 bytes produces mojibake.
-        // fs::u8path declares the input as UTF-8, then u8string() gives
-        // back the same UTF-8 bytes that ImGui expects.
-        auto u8 = fs::u8path(p).filename().u8string();
+    auto& pool = engine_->video();
+    const auto& paths = pool.paths();
+    int active = pool.active();
+
+    if (active >= 0 && active < (int)paths.size()) {
+        ImGui::TextDisabled("Active: #%d (click again or 0 to release)", active + 1);
+    } else {
+        ImGui::TextDisabled("Active: pool (click row to focus, 1..0 = pick)");
+    }
+
+    ImGui::BeginChild("##vlist", {0, 110}, true);
+    for (int i = 0; i < (int)paths.size(); ++i) {
+        // u8path ensures UTF-8 → UTF-8 round-trip on Windows; .string()
+        // would mangle Cyrillic via the ANSI code page.
+        auto u8 = fs::u8path(paths[i]).filename().u8string();
         std::string name(u8.begin(), u8.end());
-        ImGui::Selectable(name.c_str());
+        char label[512];
+        // Number prefix gives the keyboard shortcut at a glance: 1..9, 0
+        // for slot 10. ImGui needs unique IDs per row so we suffix ##i.
+        std::snprintf(label, sizeof(label), "%s%d. %s##v%d",
+                      (i == active) ? "[*] " : "    ",
+                      (i + 1) % 10,        // slot 10 shows "0"
+                      name.c_str(), i);
+        bool selected = (i == active);
+        if (ImGui::Selectable(label, selected)) {
+            // Click toggles: clicking the active row releases focus.
+            pool.set_active(selected ? -1 : i);
+        }
     }
     ImGui::EndChild();
 }
