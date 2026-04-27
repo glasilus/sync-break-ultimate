@@ -133,6 +133,10 @@ jobs:
         run: |
           brew install pkg-config autoconf automake libtool nasm ninja
 
+      - name: Install system deps (audio/libs)
+        run: |
+          brew install ffmpeg portaudio libsndfile
+
       - name: Set up Python ${{ env.PY_VERSION }}
         uses: actions/setup-python@v5
         with:
@@ -150,6 +154,7 @@ jobs:
           pyinstaller \
             --onefile --windowed --clean --noupx \
             --name DiscVPC01 \
+            --add-binary "$(which ffmpeg):." \
             --collect-all cv2 \
             --collect-all librosa \
             --collect-all scipy \
@@ -163,6 +168,44 @@ jobs:
             --collect-submodules vpc \
             --paths . \
             vpc/__main__.py
+
+      - name: Bundle dylibs into app
+        run: |
+          APP=dist/DiscVPC01.app/Contents/MacOS
+          LIBDIR=$(brew --prefix)/lib
+          mkdir -p "$APP/libs"
+          cp $LIBDIR/libportaudio*.dylib "$APP/libs/" || true
+          cp $LIBDIR/libsndfile*.dylib "$APP/libs/" || true
+          cp $LIBDIR/libav*.dylib "$APP/libs/" || true
+          cp $LIBDIR/libsw*.dylib "$APP/libs/" || true
+          cp $LIBDIR/libpostproc*.dylib "$APP/libs/" || true
+
+      - name: Fix dylib paths
+        run: |
+          APP=dist/DiscVPC01.app/Contents/MacOS
+          BIN="$APP/DiscVPC01"
+          install_name_tool -add_rpath "@executable_path/libs" "$BIN" || true
+          for lib in $APP/libs/*.dylib; do
+            install_name_tool -id "@rpath/$(basename "$lib")" "$lib" || true
+          done
+
+      - name: Fix ffmpeg permissions
+        run: |
+          chmod +x dist/DiscVPC01.app/Contents/MacOS/ffmpeg || true
+          chmod +x dist/DiscVPC01.app/Contents/MacOS/libs/*.dylib || true
+
+      - name: Patch app to include ffmpeg in PATH
+        run: |
+          APP=dist/DiscVPC01.app/Contents/MacOS/DiscVPC01
+          mv "$APP" "${APP}_bin"
+          cat << 'EOF' > "$APP"
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export PATH="$DIR:$PATH"
+          export DYLD_LIBRARY_PATH="$DIR/libs:$DYLD_LIBRARY_PATH"
+          exec "$DIR/DiscVPC01_bin"
+          EOF
+              chmod +x "$APP"
 
       - name: Bootstrap vcpkg
         run: |
