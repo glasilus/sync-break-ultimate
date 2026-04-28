@@ -280,15 +280,25 @@ class MainGUI(tk.Tk):
             _make_trace(dvar, sv, is_int)
 
     # ─── ui ───
+    # Sidebar width is locked: long filenames must NOT be allowed to push
+    # the column wider, otherwise the centre and right panels shrink.
+    SIDEBAR_W = 260
+
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=0, minsize=200)
-        self.grid_columnconfigure(1, weight=3)
-        self.grid_columnconfigure(2, weight=2)
+        # weight=0 + uniform group keeps the sidebar at SIDEBAR_W regardless
+        # of label content. The centre and right panels then split the
+        # remaining horizontal space 3:2.
+        self.grid_columnconfigure(0, weight=0, minsize=self.SIDEBAR_W)
+        self.grid_columnconfigure(1, weight=3, minsize=400)
+        self.grid_columnconfigure(2, weight=2, minsize=300)
         self.grid_rowconfigure(0, weight=1)
 
-        # Sidebar
-        sidebar = ttk.Frame(self, style='W95.TFrame')
+        # Sidebar — propagate=False locks its width to SIDEBAR_W even if a
+        # child widget asks for more room (e.g. a 60-char song filename).
+        sidebar = ttk.Frame(self, style='W95.TFrame', width=self.SIDEBAR_W)
         sidebar.grid(row=0, column=0, padx=(8, 4), pady=8, sticky='nsew')
+        sidebar.grid_propagate(False)
+        sidebar.pack_propagate(False)
         tk.Frame(sidebar, bg=C_TITLE_BAR, height=28).pack(fill='x')
         tk.Label(sidebar.winfo_children()[-1], text='Disc VPC 01',
                  fg=C_WHITE, bg=C_TITLE_BAR,
@@ -385,6 +395,19 @@ class MainGUI(tk.Tk):
         self.btn_stop.pack(fill='x', padx=8, pady=(2, 6), ipady=4)
 
     # ─── source files / presets / tabs ───
+    @staticmethod
+    def _shorten_name(name: str, width: int = 28) -> str:
+        """Truncate a filename to `width` characters, ellipsizing the middle.
+
+        `Some_very_long_song_name_2026_master_v3_final_FINAL.mp3` →
+        `Some_very_long…3_final_FINAL.mp3`. Keeps the extension visible.
+        """
+        if len(name) <= width:
+            return name
+        keep_tail = max(8, width // 2)
+        keep_head = width - keep_tail - 1
+        return name[:keep_head] + '…' + name[-keep_tail:]
+
     def _build_source_files(self, parent):
         fp = tk.LabelFrame(parent, text='Source Files', bg=C_SILVER, fg=C_TEXT,
                            bd=2, relief='groove', font=('MS Sans Serif', 10, 'bold'))
@@ -396,7 +419,9 @@ class MainGUI(tk.Tk):
                    command=self.sel_audio, style='W95.TButton').pack(side='left', fill='x', expand=True)
         self.lbl_audio_name = tk.Label(fp, text='— not loaded —',
                                        bg=C_SILVER, fg=C_DARK_GRAY,
-                                       font=('Courier New', 9), anchor='w')
+                                       font=('Courier New', 9), anchor='w',
+                                       wraplength=self.SIDEBAR_W - 30,
+                                       justify='left')
         self.lbl_audio_name.pack(fill='x', padx=24, pady=(0, 3))
 
         vr = tk.Frame(fp, bg=C_SILVER); vr.pack(fill='x', padx=6, pady=(2, 0))
@@ -406,7 +431,9 @@ class MainGUI(tk.Tk):
                    command=self.sel_video, style='W95.TButton').pack(side='left', fill='x', expand=True)
         self.lbl_video_name = tk.Label(fp, text='— not loaded —',
                                        bg=C_SILVER, fg=C_DARK_GRAY,
-                                       font=('Courier New', 9), anchor='w')
+                                       font=('Courier New', 9), anchor='w',
+                                       wraplength=self.SIDEBAR_W - 30,
+                                       justify='left')
         self.lbl_video_name.pack(fill='x', padx=24, pady=(0, 3))
 
     def _build_presets_panel(self, parent):
@@ -467,32 +494,43 @@ class MainGUI(tk.Tk):
             return C_SILVER
 
     def _bind_scale_click_jump(self, scale: ttk.Scale):
-        """Make a ttk.Scale jump to the click position on Button-1 press.
+        """Make a ttk.Scale jump to the click position AND keep drag working.
 
-        Default Tk behaviour is page-step (scroll by `bigstep` toward the
-        click), which feels broken on continuous-value sliders — clicking
-        anywhere on the trough usually pings the value to one of the
-        extremes. We compute the value from the click x and assign it
-        directly; drag continues to work as the click already turned into
-        a drag handle when ButtonPress fires.
+        Default Tk behaviour for ttk.Scale on the `clam` theme is
+        page-step on trough click (the value pings to whichever extreme
+        is closer to the click), which is unusable on continuous sliders.
+        Returning 'break' from the press handler stopped page-step, but
+        also blocked the class binding that normally starts dragging —
+        so dragging stopped working too.
+
+        The fix is to handle BOTH press and B1-Motion ourselves. Pressing
+        sets the value; subsequent motion with B1 held continues setting
+        the value. Both bindings return 'break' so the page-step class
+        binding never runs. Clicks on the slider thumb still map to the
+        thumb's centre (effectively a no-op on the visual position) and
+        then drag tracks naturally from there.
         """
-        def _on_press(ev):
+        def _value_from_x(x: int):
             try:
                 lo = float(scale.cget('from'))
                 hi = float(scale.cget('to'))
             except tk.TclError:
-                return
+                return None
             w = scale.winfo_width() or 1
             # Account for the slider thumb's half-width on each side so
             # clicks at the visible extremes map to lo/hi cleanly.
             margin = 6
-            x = max(margin, min(w - margin, ev.x))
-            frac = (x - margin) / max(1, w - 2 * margin)
-            new_val = lo + frac * (hi - lo)
-            scale.set(new_val)
-            # Return 'break' so Tk's own page-step handler doesn't run after.
+            xc = max(margin, min(w - margin, x))
+            frac = (xc - margin) / max(1, w - 2 * margin)
+            return lo + frac * (hi - lo)
+
+        def _set(ev):
+            v = _value_from_x(ev.x)
+            if v is not None:
+                scale.set(v)
             return 'break'
-        scale.bind('<Button-1>', _on_press)
+        scale.bind('<Button-1>', _set)
+        scale.bind('<B1-Motion>', _set)
 
     def _row_with_help(self, parent, text, tooltip='', mono=False):
         """Label + small [?] help icon to the right; both carry the tooltip."""
@@ -906,24 +944,26 @@ class MainGUI(tk.Tk):
             always_var.trace_add('write', _sync_always_visibility)
             _sync_always_visibility()
 
-        return block
-
-        # Per-param controls
+        # Per-effect parameter controls. These pack into `block`, NOT into
+        # the accordion body, so the hide-color-fx toggle correctly hides
+        # the whole effect (including its params) by pack_forget'ing the
+        # single block frame.
         for p in spec.params:
             if p.kind == 'choice':
-                self._row_with_help(parent, p.label, p.tooltip)
-                self._combo(parent, p.key, p.choices, indent=True)
+                self._row_with_help(block, p.label, p.tooltip)
+                self._combo(block, p.key, p.choices, indent=True)
             elif p.kind == 'string':
-                self._row_with_help(parent, p.label, p.tooltip)
-                row = tk.Frame(parent, bg=C_WHITE)
+                self._row_with_help(block, p.label, p.tooltip)
+                row = tk.Frame(block, bg=C_WHITE)
                 row.pack(fill='x', padx=20, pady=2)
                 ent = ttk.Entry(row, textvariable=self.vars[p.key])
                 ent.pack(fill='x')
             else:
-                self._row_with_help(parent, p.label, p.tooltip)
-                self._slider(parent, p.key, p.lo, p.hi, indent=True)
+                self._row_with_help(block, p.label, p.tooltip)
+                self._slider(block, p.key, p.lo, p.hi, indent=True)
 
-        tk.Frame(parent, bg=C_DARK_GRAY, height=1).pack(fill='x', padx=4)
+        tk.Frame(block, bg=C_DARK_GRAY, height=1).pack(fill='x', padx=4)
+        return block
 
     def _build_overlay_dir_picker(self, body):
         bf = tk.Frame(body, bg=C_WHITE)
@@ -1047,32 +1087,44 @@ class MainGUI(tk.Tk):
                         font=font or ('Consolas', 10),
                         **kw)
 
-    def _build_formula_panel(self, parent):
-        """FORMULA tab — Win9x BSOD palette, scrollable, monospace.
+    # ── BSOD-styled tooltip (yellow-on-blue, monospace) ──
+    def _bsod_tip(self, widget, text):
+        """Hover tooltip styled like the rest of the BSOD tab.
 
-        Layout:
-            ┌─ host (BSOD blue) ────────────────────────┐
-            │ canvas + vsb (scrollable region)         │
-            │   ┌─ inner (everything goes here) ───┐   │
-            │   │ heading                          │   │
-            │   │ controls (enable/chance/blend)   │   │
-            │   │ editor                            │   │
-            │   │ status                            │   │
-            │   │ a/b/c/d sliders (2x2 grid)        │   │
-            │   │ snippets                          │   │
-            │   │ reference                         │   │
-            │   └───────────────────────────────────┘   │
-            └────────────────────────────────────────────┘
+        Yellow text on the BSOD background with a thin white border —
+        matches the "system error" aesthetic instead of clashing with
+        Win95-yellow tooltips. Bilingual EN/RU divider supported.
+        """
+        # Use the existing Tooltip helper but post-style the popup. The
+        # Tooltip class creates its label on enter, so we wrap creation.
+        class _BsodTip(Tooltip):
+            def _enter(self_, e):
+                if self_.tip or not self_.text:
+                    return
+                self_.tip = tk.Toplevel(self_.widget)
+                self_.tip.wm_overrideredirect(True)
+                self_.tip.wm_geometry(f'+{e.x_root + 14}+{e.y_root + 8}')
+                tk.Label(self_.tip, text=self_.text,
+                         bg=C_BSOD_BG, fg=C_BSOD_ACCENT,
+                         font=('Consolas', 9), bd=1, relief='solid',
+                         padx=6, pady=4, wraplength=420, justify='left'
+                         ).pack()
+        _BsodTip(widget, text)
+
+    def _build_formula_panel(self, parent):
+        """FORMULA tab — Win9x BSOD palette, monospace, fully scrollable.
+
+        Layout sized so nothing escapes horizontally: every long line
+        wraps to the panel width (which is tracked dynamically), the
+        snippet grid drops to 2 columns when the panel is narrow, and
+        every control gets a bilingual hover tooltip — formula authors
+        who don't know NumPy still get pointers per control.
         """
         for w in parent.winfo_children():
             w.destroy()
         parent.configure(bg=C_BSOD_BG)
 
-        # Outer canvas + vertical scrollbar — the previous version laid out
-        # raw pack rows on the bare panel and ran off-screen on smaller
-        # windows with no way to scroll. Wrapping in a canvas fixes that.
-        canvas = tk.Canvas(parent, bg=C_BSOD_BG, highlightthickness=0,
-                           bd=0)
+        canvas = tk.Canvas(parent, bg=C_BSOD_BG, highlightthickness=0, bd=0)
         vsb = ttk.Scrollbar(parent, orient='vertical', command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side='right', fill='y')
@@ -1081,14 +1133,27 @@ class MainGUI(tk.Tk):
         inner = tk.Frame(canvas, bg=C_BSOD_BG)
         inner_id = canvas.create_window((0, 0), window=inner, anchor='nw')
 
-        def _refresh(_e=None):
+        # Wrap-length is a moving target — the user can resize the window
+        # at any time. Track every label that needs to wrap and update
+        # them all on canvas <Configure>.
+        wrap_labels: list[tk.Label] = []
+
+        def _refresh_scroll(_e=None):
             bbox = canvas.bbox('all')
-            if bbox is None:
-                return
-            canvas.configure(scrollregion=bbox)
-        inner.bind('<Configure>', _refresh)
-        canvas.bind('<Configure>',
-                    lambda e: canvas.itemconfig(inner_id, width=e.width))
+            if bbox is not None:
+                canvas.configure(scrollregion=bbox)
+        inner.bind('<Configure>', _refresh_scroll)
+
+        def _on_canvas_resize(e):
+            canvas.itemconfig(inner_id, width=e.width)
+            wrap = max(200, e.width - 32)
+            for lbl in wrap_labels:
+                try:
+                    lbl.configure(wraplength=wrap)
+                except tk.TclError:
+                    pass
+            _refresh_scroll()
+        canvas.bind('<Configure>', _on_canvas_resize)
 
         def _wheel(e):
             canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
@@ -1099,57 +1164,102 @@ class MainGUI(tk.Tk):
         MONO_B = ('Consolas', 11, 'bold')
         MONO_S = ('Consolas', 9)
 
-        # ── Heading ───────────────────────────────────────────────
+        def _wrap_lbl(parent, text, *, fg, font):
+            lbl = tk.Label(parent, text=text, bg=parent.cget('bg'), fg=fg,
+                           font=font, anchor='w', justify='left',
+                           wraplength=400)
+            wrap_labels.append(lbl)
+            return lbl
+
+        # ── Heading ────────────────────────────────────────────────
+        # The "A problem has been detected..." line is intentional BSOD
+        # cosplay — it's the recognisable Win9x crash text — and acts as
+        # a visual signal that this tab is "the dangerous one." Kept on
+        # request; only its sizing was the problem before.
         head = tk.Frame(inner, bg=C_BSOD_BG)
         head.pack(fill='x', padx=12, pady=(10, 2))
-        self._bsod_label(
-            head,
-            'A problem has been detected and Windows has been shut down to '
-            'prevent damage to your video.',
-            fg=C_BSOD_FG, font=MONO_B, anchor='w', justify='left',
-            wraplength=900
-        ).pack(anchor='w')
-        self._bsod_label(
-            head,
-            'FORMULA_EFFECT_EDITOR  ::  user-defined NumPy expression',
-            fg=C_BSOD_ACCENT, font=MONO_B
-        ).pack(anchor='w', pady=(6, 0))
-        self._bsod_label(
-            head,
-            'Type a NumPy expression returning an HxWx3 uint8 frame. '
-            'Available: frame, r,g,b, x,y, t, i, a,b,c,d, np, cv2.',
-            fg=C_BSOD_DIM, font=MONO_S, anchor='w', justify='left',
-            wraplength=900
-        ).pack(anchor='w', pady=(2, 0))
+        _wrap_lbl(head,
+                  'A problem has been detected and Windows has been shut '
+                  'down to prevent damage to your video.',
+                  fg=C_BSOD_FG, font=MONO_B).pack(fill='x')
+        _wrap_lbl(head,
+                  'FORMULA_EFFECT_EDITOR :: user-defined NumPy expression',
+                  fg=C_BSOD_ACCENT, font=MONO_B).pack(fill='x', pady=(6, 0))
+        _wrap_lbl(head,
+                  'Type a NumPy expression returning an HxWx3 uint8 frame. '
+                  'No NumPy experience needed — start from a snippet, '
+                  'then poke values. Hover any [?] for a hint.\n'
+                  'Введите NumPy-выражение, возвращающее кадр HxWx3 uint8. '
+                  'NumPy знать не обязательно — начните со сниппета и '
+                  'крутите цифры. Наведите на [?] для подсказки.',
+                  fg=C_BSOD_DIM, font=MONO_S).pack(fill='x', pady=(2, 0))
 
         # ── Controls row (enable / chance / blend) ────────────────
         ctl = tk.Frame(inner, bg=C_BSOD_BG)
         ctl.pack(fill='x', padx=12, pady=(8, 4))
 
-        self._bsod_label(ctl, '[ENABLE]', fg=C_BSOD_ACCENT, font=MONO).pack(side='left')
-        tk.Checkbutton(ctl, variable=self.vars['fx_formula'],
-                       bg=C_BSOD_BG, fg=C_BSOD_FG, selectcolor=C_BSOD_BG,
-                       activebackground=C_BSOD_BG, activeforeground=C_BSOD_FG,
-                       highlightthickness=0, bd=0
-                       ).pack(side='left', padx=(2, 14))
+        en_lbl = self._bsod_label(ctl, '[ENABLE]', fg=C_BSOD_ACCENT, font=MONO)
+        en_lbl.pack(side='left')
+        en_cb = tk.Checkbutton(
+            ctl, variable=self.vars['fx_formula'],
+            bg=C_BSOD_BG, fg=C_BSOD_FG, selectcolor=C_BSOD_BG,
+            activebackground=C_BSOD_BG, activeforeground=C_BSOD_FG,
+            highlightthickness=0, bd=0)
+        en_cb.pack(side='left', padx=(2, 14))
+        en_tip = ('Enable the formula effect. When off, the expression is '
+                  'ignored even if it compiles cleanly.\n'
+                  'Включить эффект-формулу. Если выключено — выражение '
+                  'игнорируется, даже если компилируется без ошибок.')
+        for w in (en_lbl, en_cb):
+            self._bsod_tip(w, en_tip)
 
-        for label, key in [('chance', 'fx_formula_chance'),
-                           ('blend',  'fx_formula_blend')]:
-            self._bsod_label(ctl, label, fg=C_BSOD_ACCENT,
-                             font=MONO).pack(side='left', padx=(8, 2))
-            self._bsod_slider(ctl, key, 0.0, 1.0, length=160)
+        for label, key, tip in [
+            ('chance', 'fx_formula_chance',
+             'Probability of firing on each frame (0..1). 0 = never, 1 = '
+             'every frame. Internally also scaled by Global Chaos.\n'
+             'Вероятность срабатывания на каждом кадре (0..1). 0 — никогда, '
+             '1 — каждый кадр. Внутри ещё масштабируется Global Chaos.'),
+            ('blend', 'fx_formula_blend',
+             'Mix between formula output (0) and original frame (1). '
+             '0 = pure formula, 1 = effect invisible.\n'
+             'Смесь между выходом формулы (0) и оригинальным кадром (1). '
+             '0 — чистая формула, 1 — эффект невидим.'),
+        ]:
+            lbl_w = self._bsod_label(ctl, label, fg=C_BSOD_ACCENT, font=MONO)
+            lbl_w.pack(side='left', padx=(8, 2))
+            sc = self._bsod_slider(ctl, key, 0.0, 1.0, length=140)
+            self._bsod_tip(lbl_w, tip)
+            self._bsod_tip(sc, tip)
             if key in self._display_vars:
-                tk.Label(ctl, textvariable=self._display_vars[key],
-                         bg=C_BSOD_BG, fg=C_BSOD_FG, font=MONO_S,
-                         width=5, anchor='w').pack(side='left', padx=(2, 0))
+                v = tk.Label(ctl, textvariable=self._display_vars[key],
+                             bg=C_BSOD_BG, fg=C_BSOD_FG, font=MONO_S,
+                             width=5, anchor='w')
+                v.pack(side='left', padx=(2, 0))
 
         # ── Editor box ────────────────────────────────────────────
         ed_outer = tk.Frame(inner, bg=C_BSOD_FG, bd=0)
         ed_outer.pack(fill='x', padx=12, pady=(6, 0))
         ed_head = tk.Frame(ed_outer, bg=C_BSOD_FG)
         ed_head.pack(fill='x')
-        tk.Label(ed_head, text=' EDITOR ', bg=C_BSOD_FG, fg=C_BSOD_BG,
-                 font=('Consolas', 9, 'bold')).pack(side='left', padx=4, pady=1)
+        ed_h_lbl = tk.Label(ed_head, text=' EDITOR ', bg=C_BSOD_FG,
+                            fg=C_BSOD_BG,
+                            font=('Consolas', 9, 'bold'))
+        ed_h_lbl.pack(side='left', padx=4, pady=1)
+        ed_help = tk.Label(ed_head, text='[?]', bg=C_BSOD_FG, fg=C_BSOD_BG,
+                           font=('Consolas', 9, 'bold'),
+                           cursor='question_arrow')
+        ed_help.pack(side='left', padx=(2, 0))
+        ed_tip = (
+            'Type any Python expression that returns the next frame. '
+            'Available names: frame, r, g, b, x, y, t, i, a, b, c, d, np, '
+            'cv2. Errors silently fall back to the source frame, so a '
+            'typo never crashes the render.\n'
+            'Введите любое Python-выражение, которое возвращает следующий '
+            'кадр. Доступно: frame, r, g, b, x, y, t, i, a, b, c, d, np, '
+            'cv2. При ошибке возвращается оригинальный кадр — опечатка не '
+            'падает рендер.')
+        for w in (ed_h_lbl, ed_help):
+            self._bsod_tip(w, ed_tip)
 
         ed_inner = tk.Frame(ed_outer, bg=C_BSOD_BG)
         ed_inner.pack(fill='x', padx=1, pady=1)
@@ -1173,19 +1283,42 @@ class MainGUI(tk.Tk):
                  font=MONO_B).pack(side='left')
         self.formula_status_label = tk.Label(
             status, textvariable=self.formula_status_var,
-            bg=C_BSOD_BG, fg=C_BSOD_FG, font=MONO, anchor='w', justify='left',
-            wraplength=900)
+            bg=C_BSOD_BG, fg=C_BSOD_FG, font=MONO, anchor='w',
+            justify='left', wraplength=400)
+        wrap_labels.append(self.formula_status_label)
         self.formula_status_label.pack(side='left', fill='x', expand=True)
         self._update_formula_status()
 
         # ── Live params a/b/c/d in 2x2 grid ───────────────────────
         pbox = tk.Frame(inner, bg=C_BSOD_BG)
         pbox.pack(fill='x', padx=12, pady=(2, 4))
-        self._bsod_label(
-            pbox, '[ LIVE PARAMS — referenced as a, b, c, d ]',
-            fg=C_BSOD_ACCENT, font=MONO).pack(anchor='w', pady=(2, 2))
+        ph = tk.Frame(pbox, bg=C_BSOD_BG)
+        ph.pack(fill='x')
+        self._bsod_label(ph, '[ LIVE PARAMS — referenced as a, b, c, d ]',
+                         fg=C_BSOD_ACCENT, font=MONO).pack(side='left')
+        ph_help = tk.Label(ph, text='[?]', bg=C_BSOD_BG, fg=C_BSOD_ACCENT,
+                           font=MONO_S, cursor='question_arrow')
+        ph_help.pack(side='left', padx=(4, 0))
+        self._bsod_tip(ph_help,
+            'Four free sliders (0..1) you can wire into the expression. '
+            'Use them as "knobs" — `a` could control speed, `b` size, etc.\n'
+            'Четыре свободных слайдера (0..1), которые можно использовать '
+            'в выражении. Используйте как «ручки» — `a` для скорости, '
+            '`b` для размера и т.д.')
+
         grid = tk.Frame(pbox, bg=C_BSOD_BG)
         grid.pack(fill='x')
+        # Per-letter usage hints — short, bilingual, concrete.
+        param_tips = {
+            'fx_formula_a': 'Free knob #1. Common idiom: amplitude.\n'
+                            'Свободная ручка №1. Часто — амплитуда.',
+            'fx_formula_b': 'Free knob #2. Common idiom: speed/frequency.\n'
+                            'Свободная ручка №2. Часто — скорость/частота.',
+            'fx_formula_c': 'Free knob #3. Common idiom: threshold.\n'
+                            'Свободная ручка №3. Часто — порог.',
+            'fx_formula_d': 'Free knob #4. Common idiom: blend/mix.\n'
+                            'Свободная ручка №4. Часто — микс/блендинг.',
+        }
         for idx, (letter, key) in enumerate([
                 ('a', 'fx_formula_a'), ('b', 'fx_formula_b'),
                 ('c', 'fx_formula_c'), ('d', 'fx_formula_d')]):
@@ -1193,21 +1326,76 @@ class MainGUI(tk.Tk):
             cell = tk.Frame(grid, bg=C_BSOD_BG)
             cell.grid(row=r, column=c, sticky='ew', padx=8, pady=2)
             grid.grid_columnconfigure(c, weight=1)
-            self._bsod_label(cell, f' {letter} ', fg=C_BSOD_ACCENT,
-                             font=MONO_B).pack(side='left')
-            self._bsod_slider(cell, key, 0.0, 1.0, length=200)
+            ll = self._bsod_label(cell, f' {letter} ', fg=C_BSOD_ACCENT,
+                                  font=MONO_B)
+            ll.pack(side='left')
+            sc = self._bsod_slider(cell, key, 0.0, 1.0, length=160)
+            self._bsod_tip(ll, param_tips[key])
+            self._bsod_tip(sc, param_tips[key])
             if key in self._display_vars:
                 tk.Label(cell, textvariable=self._display_vars[key],
                          bg=C_BSOD_BG, fg=C_BSOD_FG, font=MONO_S,
                          width=5, anchor='w').pack(side='left', padx=(4, 0))
 
-        # ── Snippets ──────────────────────────────────────────────
+        # ── Snippets — one bilingual hint per snippet ────────────
         sn = tk.Frame(inner, bg=C_BSOD_BG)
         sn.pack(fill='x', padx=12, pady=(8, 4))
-        self._bsod_label(sn, '[ SNIPPETS — click to load ]',
-                         fg=C_BSOD_ACCENT, font=MONO).pack(anchor='w')
+        sn_head = tk.Frame(sn, bg=C_BSOD_BG)
+        sn_head.pack(fill='x')
+        self._bsod_label(sn_head, '[ SNIPPETS — click to load ]',
+                         fg=C_BSOD_ACCENT, font=MONO).pack(side='left')
+        snip_help = tk.Label(sn_head, text='[?]', bg=C_BSOD_BG,
+                             fg=C_BSOD_ACCENT, font=MONO_S,
+                             cursor='question_arrow')
+        snip_help.pack(side='left', padx=(4, 0))
+        self._bsod_tip(snip_help,
+            "Each button replaces the editor with a working example. "
+            "Click one, then tweak — that's the recommended way to learn "
+            "the syntax without reading any NumPy docs.\n"
+            "Каждая кнопка заменяет редактор готовым примером. Нажмите, "
+            "потом поменяйте цифры — рекомендованный способ освоиться "
+            "без чтения документации NumPy.")
+
+        # Per-snippet plain-language explanations (EN + RU). Index aligns
+        # with FORMULA_SNIPPETS; the order is fixed there.
+        snippet_tips = [
+            ('Pass-through. Use as a base when you want to blend a small '
+             'change on top of the original frame.\n'
+             'Пасс-через. База, когда хочется чуть-чуть изменить кадр.'),
+            ('Photographic negative — every colour flipped (255 - value).\n'
+             'Фотонегатив — каждый цвет инвертирован (255 - value).'),
+            ('Brightness pulses with time. Speed grows with `a`.\n'
+             'Яркость пульсирует со временем. Скорость зависит от `a`.'),
+            ('Red channel slides right, blue slides left. Magnitude '
+             'driven by `a`. Bigger `a` → wider chromatic split.\n'
+             'Красный канал сдвигается вправо, синий — влево. Размер '
+             'сдвига зависит от `a`. Больше — шире цветной разрыв.'),
+            ('Reduces colour depth — chunky retro palette. `a` controls '
+             'how aggressive the chunking is.\n'
+             'Снижает цветовую глубину — крупная ретро-палитра. `a` '
+             'управляет агрессивностью.'),
+            ('Every other row darkened. CRT-monitor style.\n'
+             'Каждая вторая строка затемнена. Стиль CRT-монитора.'),
+            ('Sinusoidal vertical wave moves through the frame. `a` = '
+             'amplitude.\n'
+             'Синусоидальная вертикальная волна. `a` — амплитуда.'),
+            ('Demoscene plasma overlay — colourful waves. `a` controls '
+             'intensity.\n'
+             'Demoscene-плазма поверх кадра — цветные волны. `a` — '
+             'интенсивность.'),
+            ('Binary threshold — pixels become pure black or pure white. '
+             'Threshold level oscillates with time, modulated by `a`.\n'
+             'Бинарный порог — пиксели становятся чисто чёрными или белыми. '
+             'Уровень порога осциллирует во времени, модуляция — `a`.'),
+            ('Left half of the frame is mirrored on the right. Cheap, '
+             'classy psychedelic look.\n'
+             'Левая половина кадра отражена на правую. Дешёвый и '
+             'эффектный психоделический приём.'),
+        ]
         sg = tk.Frame(sn, bg=C_BSOD_BG)
         sg.pack(fill='x', pady=2)
+        # 5 columns by default; the inner frame is width-tracked, so on
+        # narrow windows the row simply wraps via the canvas scroll.
         for i, (lbl, expr) in enumerate(self.FORMULA_SNIPPETS):
             r, c = divmod(i, 5)
             btn = tk.Button(
@@ -1219,35 +1407,51 @@ class MainGUI(tk.Tk):
                 highlightthickness=0, cursor='hand2', pady=1)
             btn.grid(row=r, column=c, padx=3, pady=3, sticky='ew')
             sg.grid_columnconfigure(c, weight=1)
+            if i < len(snippet_tips):
+                self._bsod_tip(btn, snippet_tips[i])
 
-        # ── Reference ─────────────────────────────────────────────
+        # ── Reference — bilingual cheat-sheet ─────────────────────
         ref = tk.Frame(inner, bg=C_BSOD_BG)
         ref.pack(fill='x', padx=12, pady=(8, 4))
         self._bsod_label(ref, '[ REFERENCE / СПРАВКА ]',
                          fg=C_BSOD_ACCENT, font=MONO).pack(anchor='w')
         ref_text = (
-            '  vars   :  frame (HxWx3 uint8)   r,g,b (HxW uint8)   x,y (HxW float32)\n'
-            '         :  t (sec)   i (intensity)   a,b,c,d (live sliders 0..1)\n'
-            '  funcs  :  np  cv2  sin cos tan abs clip sqrt exp log  pi\n'
-            '  output :  HxWx3 uint8 — auto-broadcast & clip; errors fall back to source\n'
-            '  ex     :  255 - frame\n'
-            '         :  np.roll(frame, int(20*np.sin(t*5)), 1)\n'
-            '         :  cv2.GaussianBlur(frame, (15,15), 0)'
+            'EN ── variables you can use in the formula ──\n'
+            '  frame   :  current frame, shape (H, W, 3), uint8\n'
+            '  r,g,b   :  per-channel views, shape (H, W), uint8\n'
+            '  x,y     :  pixel-coordinate grids, shape (H, W), float32\n'
+            '  t       :  segment time in seconds (float)\n'
+            '  i       :  current intensity 0..1 (float)\n'
+            '  a,b,c,d :  live sliders 0..1 (float)\n'
+            '  np, cv2 :  NumPy and OpenCV — full APIs available\n'
+            '\n'
+            'RU ── переменные, которые можно использовать в формуле ──\n'
+            '  frame   :  текущий кадр, форма (H, W, 3), uint8\n'
+            '  r,g,b   :  виды каналов, форма (H, W), uint8\n'
+            '  x,y     :  сетки координат пикселей, (H, W), float32\n'
+            '  t       :  время сегмента в секундах (float)\n'
+            '  i       :  текущая интенсивность 0..1 (float)\n'
+            '  a,b,c,d :  live-слайдеры 0..1 (float)\n'
+            '  np, cv2 :  NumPy и OpenCV — доступны полностью\n'
+            '\n'
+            'Examples / примеры:\n'
+            '  255 - frame                        # invert / инверт\n'
+            '  np.roll(frame, int(20*np.sin(t*5)), 1)  # h-slide\n'
+            '  cv2.GaussianBlur(frame, (15,15), 0)     # blur'
         )
-        tk.Label(ref, text=ref_text, bg=C_BSOD_BG, fg=C_BSOD_DIM,
-                 font=MONO_S, justify='left', anchor='w'
-                 ).pack(anchor='w', padx=4, pady=(2, 0))
+        ref_lbl = tk.Label(ref, text=ref_text, bg=C_BSOD_BG, fg=C_BSOD_DIM,
+                           font=MONO_S, justify='left', anchor='w')
+        ref_lbl.pack(anchor='w', padx=4, pady=(2, 0))
 
         # ── Footer ────────────────────────────────────────────────
         ft = tk.Frame(inner, bg=C_BSOD_BG)
         ft.pack(fill='x', padx=12, pady=(8, 14))
-        self._bsod_label(
-            ft,
-            'Save the formula via Preset — expression + a/b/c/d are stored '
-            'in the preset config. Технический контакт со следующим админом.',
-            fg=C_BSOD_DIM, font=MONO_S, anchor='w', justify='left',
-            wraplength=900
-        ).pack(anchor='w')
+        _wrap_lbl(ft,
+                  'Save the formula via Preset — expression + a/b/c/d are '
+                  'stored in the preset config.\n'
+                  'Чтобы сохранить формулу, сохраните Preset — выражение '
+                  'и a/b/c/d попадут в конфиг пресета.',
+                  fg=C_BSOD_DIM, font=MONO_S).pack(fill='x')
 
     def _bsod_slider(self, parent, key, lo, hi, length=160):
         """ttk.Scale with click-jump bound — for the BSOD formula tab."""
@@ -1316,7 +1520,9 @@ class MainGUI(tk.Tk):
         p = filedialog.askopenfilename(filetypes=[('Audio', '*.mp3 *.wav')])
         if p:
             self.audio_path = p
-            self.lbl_audio_name.configure(text=os.path.basename(p))
+            self.lbl_audio_name.configure(
+                text=self._shorten_name(os.path.basename(p)))
+            Tooltip(self.lbl_audio_name, p)
             self._audio_dot.configure(fg=C_GREEN_DOT)
 
     def sel_video(self):
@@ -1326,9 +1532,11 @@ class MainGUI(tk.Tk):
         if ps:
             self.video_paths = list(ps)
             n = len(self.video_paths)
-            self.lbl_video_name.configure(
-                text=os.path.basename(self.video_paths[0]) if n == 1
-                else f'{n} files loaded')
+            label_text = (self._shorten_name(os.path.basename(self.video_paths[0]))
+                          if n == 1 else f'{n} files loaded')
+            self.lbl_video_name.configure(text=label_text)
+            tip = self.video_paths[0] if n == 1 else '\n'.join(self.video_paths)
+            Tooltip(self.lbl_video_name, tip)
             self._video_dot.configure(fg=C_GREEN_DOT)
 
     def sel_ov(self):
