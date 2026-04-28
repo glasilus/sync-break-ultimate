@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import random
 import subprocess
+import time
 from typing import Callable, List, Optional
 
 import cv2
@@ -19,6 +20,11 @@ from vpc.analyzer import AudioAnalyzer, Segment, SegmentType
 from .config import RenderConfig, RENDER_DRAFT, RENDER_FINAL
 from .source import VideoPool
 from .sink import FFmpegSink, EXPORT_FORMATS, ffmpeg_bin
+from .encoders import (
+    EncoderSpec, find_spec as find_encoder_spec,
+    fallback_spec as encoder_fallback_spec,
+    build_rate_control_args,
+)
 
 # Datamosh deliberately produces a broken H.264 stream (no I-frames). When
 # OpenCV's bundled ffmpeg decodes it, it spams "Invalid NAL unit size",
@@ -112,6 +118,70 @@ class BreakcoreEngine:
                      f'{result.stderr[:200].decode(errors="replace")}')
         return result.returncode == 0
 
+    # ----- progress / ETA -----
+    @staticmethod
+    def _fmt_dur(secs: float) -> str:
+        """Compact 'Xm YYs' / 'YYs' / '1.2s' formatting for ETA strings."""
+        if secs < 0 or secs != secs:  # NaN guard
+            return '?'
+        if secs < 10:
+            return f'{secs:.1f}s'
+        secs = int(round(secs))
+        if secs < 60:
+            return f'{secs}s'
+        m, s = divmod(secs, 60)
+        if m < 60:
+            return f'{m}m{s:02d}s'
+        h, m = divmod(m, 60)
+        return f'{h}h{m:02d}m'
+
+    def _emit_progress(self, frames_emitted: int, total_frames: int) -> None:
+        """Throttled progress + ETA. Called after every encoded frame; only
+        actually fires the callback once every PROGRESS_INTERVAL seconds
+        of wall time so the GUI doesn't get hammered.
+
+        ETA is linear extrapolation: elapsed * (remaining / done). The
+        first second of rendering is excluded (very noisy estimate) — we
+        still emit pct, just without ETA.
+        """
+        now = time.perf_counter()
+        if now - self._last_progress_t < 0.5:
+            return
+        self._last_progress_t = now
+        if self.progress_callback is None:
+            return
+        if total_frames <= 0:
+            return
+        pct = int(min(100, frames_emitted * 100 // total_frames))
+        elapsed = now - self._render_t0
+        if frames_emitted >= 1 and elapsed > 1.0:
+            rate = frames_emitted / elapsed   # encoded frames per sec
+            remaining = max(0, total_frames - frames_emitted)
+            eta = remaining / max(rate, 1e-6)
+            msg = (f'Rendering {pct}% — '
+                   f'ETA {self._fmt_dur(eta)} '
+                   f'({rate:.1f} fps)')
+        else:
+            msg = f'Rendering {pct}%...'
+        self.progress_callback(msg, pct)
+
+    # ----- pipe packing -----
+    @staticmethod
+    def _pack_frame(rgb: np.ndarray, input_pix_fmt: str) -> bytes:
+        """Convert a uint8 RGB HxWx3 frame to the pipe's pixel format.
+
+        - 'rgb24' → raw bytes, 3 bytes/pixel.
+        - 'yuv420p' → planar I420 via OpenCV, 1.5 bytes/pixel. ffmpeg
+          would do the same conversion internally, so we lose nothing
+          in fidelity but cut the inter-process bandwidth in half.
+
+        Any unrecognised format falls back to rgb24 so a future codec
+        misconfig can't silently produce broken bytes.
+        """
+        if input_pix_fmt == 'yuv420p':
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2YUV_I420).tobytes()
+        return rgb.tobytes()
+
     # ----- silence treatment -----
     def _apply_silence(self, frame: np.ndarray) -> np.ndarray:
         mode = self.config.silence_mode
@@ -164,6 +234,12 @@ class BreakcoreEngine:
 
         # Open video pool, then derive output size (backlog #2 needs source).
         pool = VideoPool(video_paths)
+        if pool.any_cached:
+            # The decode is lazy — log only the intent so the user sees
+            # *why* the first segment may take a moment to start. A
+            # corrupt/oversize source falls back transparently.
+            self.log('Source clip(s) eligible for in-memory cache — '
+                     'first read will pre-decode.')
         out_w, out_h = rc.output_size(render_mode, source_size=pool.primary_size)
         fps = rc.fps(render_mode)
         preset = rc.encoder_preset(render_mode)
@@ -188,18 +264,48 @@ class BreakcoreEngine:
         flash_fx = FlashEffect(enabled=True, chance=1.0)
 
         # ----- ffmpeg sink -----
-        fmt = EXPORT_FORMATS.get(rc.video_codec_label, EXPORT_FORMATS['H.264 (MP4)'])
-        sink = FFmpegSink(
-            width=out_w, height=out_h, fps=fps,
-            audio_path=audio_path, output_path=output_path,
-            vcodec=fmt['vcodec'], acodec=fmt['acodec'],
-            pix_fmt=fmt['pix_fmt'],
-            preset=preset, crf=crf,
-            target_duration=target_duration,
-            extra_v_flags=fmt.get('extra_v', []),
-        )
-        self.log('Starting ffmpeg pipe...')
-        sink.open()
+        # Resolve the encoder spec from the user's chosen label. If the
+        # label was saved on a machine with HW support and we don't have
+        # it here, drop to the soft fallback before even trying.
+        spec = find_encoder_spec(rc.video_codec_label)
+        if spec is None:
+            self.log(f"Unknown codec label '{rc.video_codec_label}', "
+                     f"using {encoder_fallback_spec().label}.")
+            spec = encoder_fallback_spec()
+
+        def _open_sink(s: EncoderSpec) -> FFmpegSink:
+            rc_args = build_rate_control_args(
+                s, crf=crf, preset=preset, tune=rc.tune)
+            sk = FFmpegSink(
+                width=out_w, height=out_h, fps=fps,
+                audio_path=audio_path, output_path=output_path,
+                vcodec=s.vcodec, acodec=s.acodec, pix_fmt=s.pix_fmt,
+                preset=preset, crf=crf,
+                target_duration=target_duration,
+                extra_v_flags=list(s.extra_v),
+                tune=rc.tune,
+                rate_control_args=rc_args,
+            )
+            self.log(f'Starting ffmpeg pipe ({s.vcodec})...')
+            sk.open()
+            return sk
+
+        sink = _open_sink(spec)
+
+        # Hardware encoders die at init when the driver's missing or busy
+        # ('No NVENC capable devices', 'Failed to initialize MFX session',
+        # 'Cannot load amfrt64.dll'). Probe early — if ffmpeg already
+        # exited, swallow the failure and re-open with libx264 instead of
+        # bombing the render. Soft codecs skip this check; the timeout
+        # is short enough not to be felt.
+        if spec.is_hw:
+            err = sink.early_failure(wait=0.5)
+            if err is not None:
+                self.log(f'HW encoder {spec.vcodec} failed at init '
+                         f'(falling back to libx264). Cause:\n{err.strip()[:400]}')
+                fb = encoder_fallback_spec()
+                spec = fb
+                sink = _open_sink(fb)
 
         # ----- datamosh pre-bake -----
         datamosh_source_path = None
@@ -232,6 +338,13 @@ class BreakcoreEngine:
         target_total_frames = int(round(target_duration * fps))
         frames_emitted = 0
         last_frame_bytes: Optional[bytes] = None
+
+        # ETA bookkeeping. _render_t0 starts here (after analysis +
+        # scene-detect + datamosh prebake) so the printed ETA reflects
+        # the actual encode loop, not setup work. _last_progress_t
+        # throttles callbacks to ~2 Hz.
+        self._render_t0 = time.perf_counter()
+        self._last_progress_t = 0.0
 
         try:
             for seg_idx, seg in enumerate(segments):
@@ -280,7 +393,7 @@ class BreakcoreEngine:
                     dummy = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                     flash_frame = flash_fx._apply(dummy, seg, is_draft)
                     flash_frame = cv2.resize(flash_frame, (out_w, out_h))
-                    flash_bytes = flash_frame.tobytes()
+                    flash_bytes = self._pack_frame(flash_frame, sink.input_pix_fmt)
                     aborted = False
                     for _ in range(flash_frames):
                         if frames_emitted >= target_total_frames:
@@ -316,7 +429,7 @@ class BreakcoreEngine:
                     except Exception as e:
                         self.log(f'Mystery error: {e}')
 
-                    fb = frame.tobytes()
+                    fb = self._pack_frame(frame, sink.input_pix_fmt)
                     for _ in range(stutter_repeat):
                         if frames_emitted >= target_total_frames:
                             break
@@ -325,14 +438,11 @@ class BreakcoreEngine:
                         frames_written += 1
                         frames_emitted += 1
                         last_frame_bytes = fb
+                        self._emit_progress(frames_emitted, target_total_frames)
                         if frames_written >= n_frames:
                             break
                 if frames_emitted >= target_total_frames:
                     break
-
-                if self.progress_callback:
-                    pct = int((seg_idx / max(1, len(segments))) * 100)
-                    self.progress_callback(f'Rendering... {pct}%', pct)
 
             # ----- pad to target_total_frames -----
             # Cover any residual gap (last segment dropped by min_segment_dur,
@@ -360,6 +470,9 @@ class BreakcoreEngine:
             sink.close()
 
         if not self.abort:
-            self.log(f'Done. Output: {output_path}')
+            elapsed = time.perf_counter() - self._render_t0
+            rt_factor = (target_duration / elapsed) if elapsed > 0 else 0.0
+            self.log(f'Done in {self._fmt_dur(elapsed)} '
+                     f'({rt_factor:.2f}x realtime). Output: {output_path}')
             return True
         return False

@@ -85,6 +85,26 @@ pip install -r requirements.txt
 python -m vpc
 ```
 
+The above is platform-agnostic. Concrete launch commands per OS:
+
+| OS | Run command (from repo root) |
+|---|---|
+| Windows | `.venv\Scripts\python.exe -m vpc` |
+| Linux | `.venv/bin/python -m vpc` |
+| macOS | `.venv/bin/python -m vpc` |
+
+The bundled `imageio-ffmpeg` wheel ships an ffmpeg binary for every supported platform — no system-wide ffmpeg install is required. All OS-specific quirks (Windows console-window suppression for spawned ffmpeg, ffprobe.exe vs ffprobe lookup, `.venv/Scripts` vs `.venv/bin`) are handled inside the codebase.
+
+**Hardware-encoder availability per OS:** the GUI's codec dropdown filters itself against `ffmpeg -encoders` at startup, so each platform sees only encoders its ffmpeg build actually supports.
+
+| OS | Available HW encoders |
+|---|---|
+| Windows | NVENC (NVIDIA), QSV (Intel), AMF (AMD) |
+| Linux | NVENC (NVIDIA), QSV (Intel) |
+| macOS | VideoToolbox (Apple Silicon / Intel Macs) |
+
+> **Linux AMD note:** AMD on Linux uses VAAPI, which requires hwframe upload (a filter graph step). The current pipe-driven sink doesn't wire that up, so Linux AMD users fall back to libx264 — still benefits from yuv420p pipe, source cache, ETA, and Quality presets. If you need AMD HW acceleration on Linux, file an issue and we can add a VAAPI ingress path.
+
 **Key Python dependencies:**
 
 | Package | Purpose |
@@ -740,23 +760,45 @@ Located in the **EXPORT** tab.
 
 In all three modes, dimensions are silently rounded down to the nearest **even** number — `yuv420p` (and ProRes 422) require chroma subsampling on even axes, and odd numbers would crash the ffmpeg pipe. So `1281 × 721 → 1280 × 720`. This includes `Match source` when the source itself has an odd dimension.
 
-**Quality CRF** *(0 – 51, default 18)* — Constant Rate Factor for H.264 / H.265 / VP9 encoding. Lower = higher quality + larger file. `0` is lossless, `18` is visually near-lossless, `23` is the H.264 default, `28` is small-file territory, `51` is artifact art. ProRes ignores CRF (the profile flag controls quality there).
+**Quality** *(dropdown — Custom / Archive / High / Web / Compact)* — convenience preset that fills CRF / ffmpeg Preset / Tune below in one click. Manual edits flip this dropdown to `Custom`; the manual fields are **never disabled** by the preset — pick what you want.
 
-**Codec / Container** — pick a codec/container combination from the dropdown:
+| Preset | CRF | ffmpeg Preset | Tune | Use case |
+|---|---|---|---|---|
+| **Custom** | — | — | — | Marker; doesn't mutate anything. Shown when manual values don't match any preset. |
+| **Archive** | 17 | slow | grain | Highest fidelity. `tune=grain` keeps datamosh / glitch noise crisp instead of smoothing it. Largest file. |
+| **High** | 20 | medium | none | Default. Visually near-lossless at sensible speed. |
+| **Web** | 23 | fast | none | Smaller / faster, fine for sharing. |
+| **Compact** | 26 | fast | none | Smallest reasonable file that's still watchable. |
+
+**Quality CRF** *(0 – 51, default 18)* — Constant Rate Factor for H.264 / H.265 / VP9 encoding. Lower = higher quality + larger file. `0` lossless, `18` visually near-lossless, `28` small file. HW encoders (NVENC / QSV / AMF / VideoToolbox) interpret the same value through their own constant-quality knob.
+
+**Codec / Container** — pick a codec/container combination from the dropdown. The list is **filtered at startup** against `ffmpeg -encoders` — hardware variants only show up when the local ffmpeg build supports them. If the chosen HW encoder fails at init (no driver, GPU busy), the engine logs the error and **automatically falls back to libx264** without aborting the render.
 
 | Choice | Container | Video codec | Audio codec | Notes |
 |---|---|---|---|---|
-| **H.264 (MP4)** | `.mp4` | `libx264` | AAC | Universal compatibility. |
+| **H.264 (MP4)** | `.mp4` | `libx264` | AAC | Universal compatibility. Always available. |
 | **H.265 (MP4)** | `.mp4` | `libx265` (`hvc1` tag) | AAC | Smaller files, slower encode, less compatible playback. |
 | **H.264 (MKV)** | `.mkv` | `libx264` | AAC | Matroska — accepts almost any codec, useful when MP4's strict moov layout is a problem. |
 | **H.265 (MKV)** | `.mkv` | `libx265` | AAC | |
 | **H.264 (MOV)** | `.mov` | `libx264` | AAC | QuickTime container. |
-| **ProRes (MOV)** | `.mov` | `prores_ks` (profile 3 = 422 HQ) | PCM 16-bit | Editing-grade master, very large files, perfect for handing off to a DaVinci/Premiere timeline. |
+| **ProRes (MOV)** | `.mov` | `prores_ks` (profile 3 = 422 HQ) | PCM 16-bit | Editing-grade master, very large files. |
 | **VP9 (WebM)** | `.webm` | `libvpx-vp9` | Opus | Web/streaming-friendly. Slow encode. |
+| **H.264 / H.265 NVENC (MP4)** | `.mp4` | `h264_nvenc` / `hevc_nvenc` | AAC | NVIDIA hardware encoder. Several × faster than libx264 with mostly imperceptible quality loss. Listed only if NVENC is available locally. |
+| **H.264 / H.265 QSV (MP4)** | `.mp4` | `h264_qsv` / `hevc_qsv` | AAC | Intel Quick Sync. |
+| **H.264 / H.265 AMF (MP4)** | `.mp4` | `h264_amf` / `hevc_amf` | AAC | AMD AMF (Windows). |
+| **H.264 / H.265 VideoToolbox (MP4)** | `.mp4` | `h264_videotoolbox` / `hevc_videotoolbox` | AAC | Apple hardware encoder (macOS). |
 
-The Save dialog auto-uses the matching extension. If you type a different one, the program logs a warning and respects your choice (useful for unusual codec/container combinations).
+The Save dialog auto-uses the matching extension. If you type a different one, the program logs a warning and respects your choice.
 
-**ffmpeg Preset** *(ultrafast / fast / medium / slow)* — encoder speed/efficiency trade-off for x264 / x265. Has no effect on ProRes or VP9 (those have their own internal speed controls).
+**ffmpeg Preset** *(ultrafast / fast / medium / slow)* — encoder speed/efficiency trade-off. For libx264 / libx265 passed through directly. For HW encoders mapped to that encoder's native preset (e.g. NVENC `p1..p7`, AMF `speed/balanced/quality`).
+
+**Tune** *(none / film / grain / animation / stillimage)* — `-tune` hint for libx264 / libx265 only; ignored for other codecs. `none` means the flag is omitted entirely. `grain` is the right choice for datamosh / heavy noise material.
+
+**Pipe pixel format** — when the output codec is `yuv420p` (everything except ProRes), frames are converted from RGB to planar I420 *on the Python side* before being piped to ffmpeg, halving inter-process bandwidth. ProRes 4:2:2 10-bit stays on rgb24 to preserve chroma precision. Invisible to the user.
+
+**Source cache (in-memory)** — short source clips (default ≤1.5 GB decompressed) are decoded once into RAM on first read, after which random seeks are O(1) array indexing instead of OpenCV keyframe-rewind + re-decode. Speeds up segment-heavy renders. Long source files transparently fall back to streaming. Tune via env var `VPC_SOURCE_CACHE_MAX_BYTES` (`0` to disable, any byte count to widen).
+
+**Progress + ETA** — during render the status line updates ~twice a second with current percentage, ETA estimate, and the actual encoded fps. Final log line shows total time and an `Nx realtime` factor.
 
 ---
 

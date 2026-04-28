@@ -31,6 +31,11 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from vpc.render import BreakcoreEngine
+from vpc.render.quality import (
+    QUALITY_PRESETS, TUNE_VALUES, CUSTOM as QUALITY_CUSTOM,
+    preset_names as quality_preset_names, detect_preset as detect_quality,
+)
+from vpc.render.encoders import available_specs as available_encoder_specs
 from vpc.registry import EFFECTS, GROUP_ORDER, default_cfg, bi
 from vpc.registry import ACCORDION_HIDDEN_GROUPS
 from vpc.mystery import MYSTERY_KNOBS
@@ -251,6 +256,16 @@ class MainGUI(tk.Tk):
         self._color_fx_snapshot: dict = {}
         self.var_resolution_mode = tk.StringVar(value='preset')
         self.var_formula_expr = tk.StringVar(value='frame')
+        # Encoder quality fields. The Quality dropdown is a convenience —
+        # picking a preset writes crf/export_preset/tune below; touching
+        # any of those by hand flips the dropdown to 'Custom'. Manual
+        # editing always wins.
+        self.var_quality_preset = tk.StringVar(value='High')
+        self.var_tune = tk.StringVar(value='none')
+        # Reentrancy guard: set True while a Quality preset is writing
+        # the three managed fields, so their traces don't immediately
+        # bounce the dropdown back to 'Custom'.
+        self._applying_quality = False
 
         # Display vars for slider numeric labels
         self._display_vars = {}
@@ -784,6 +799,42 @@ class MainGUI(tk.Tk):
         if refresh is not None:
             self.after_idle(refresh)
 
+    # ─── Quality preset ↔ manual fields sync ───
+    def _on_quality_preset_changed(self):
+        """Quality dropdown changed → write its (crf, preset, tune) into
+        the manual fields. 'Custom' is a marker — it doesn't mutate."""
+        name = self.var_quality_preset.get()
+        spec = QUALITY_PRESETS.get(name)
+        if spec is None:  # Custom or unknown
+            return
+        self._applying_quality = True
+        try:
+            self.vars['crf'].set(int(spec['crf']))
+            if hasattr(self, 'preset_enc_combo'):
+                self.preset_enc_combo.set(spec['export_preset'])
+            self.var_tune.set(spec['tune'])
+        finally:
+            self._applying_quality = False
+
+    def _refresh_quality_label(self):
+        """Manual field changed → flip Quality dropdown to whichever
+        preset (if any) now matches, else 'Custom'. Skipped while a
+        preset is mid-apply to avoid trace ping-pong."""
+        if getattr(self, '_applying_quality', False):
+            return
+        if not hasattr(self, 'quality_combo'):
+            return
+        try:
+            crf = int(round(float(self.vars['crf'].get())))
+        except (tk.TclError, TypeError, ValueError):
+            return
+        preset = (self.preset_enc_combo.get()
+                  if hasattr(self, 'preset_enc_combo') else 'medium')
+        tune = self.var_tune.get() or 'none'
+        label = detect_quality(crf=crf, export_preset=preset, tune=tune)
+        if self.var_quality_preset.get() != label:
+            self.var_quality_preset.set(label)
+
     def _sync_silence_radio_visibility(self):
         """Hide the 'Dim' radio button while color-fx hiding is active."""
         radios = getattr(self, '_silence_radios', None)
@@ -1030,7 +1081,28 @@ class MainGUI(tk.Tk):
         ttk.Spinbox(cwf, from_=64, to=4320, textvariable=self.vars['custom_h'],
                     width=8).pack(side='left', padx=2)
 
-        # CRF / codec / preset
+        # Quality preset — convenience layer that fills CRF / ffmpeg
+        # preset / tune below. Selecting an entry writes those three
+        # fields; touching them by hand flips this dropdown back to
+        # 'Custom'. Manual control is never taken away.
+        self._row_with_help(wr, 'Quality', bi(
+            'Convenience preset that fills CRF, ffmpeg Preset and Tune below. '
+            "Pick 'Custom' or just edit any of those manually for full control. "
+            'Archive = grain-tuned archival, High = visually lossless default, '
+            'Web = smaller/faster, Compact = smallest watchable.',
+            'Удобный пресет: заполняет CRF, ffmpeg Preset и Tune ниже одним кликом. '
+            "'Custom' или ручное редактирование любого из полей — всё под контролем. "
+            'Archive — архив с tune=grain, High — визуально без потерь по умолчанию, '
+            'Web — меньше/быстрее, Compact — самый компактный смотрибельный.'))
+        qf = tk.Frame(wr, bg=C_SILVER); qf.pack(fill='x', padx=20, pady=2)
+        self.quality_combo = ttk.Combobox(
+            qf, values=quality_preset_names(), textvariable=self.var_quality_preset,
+            style='W95.TCombobox', width=12, state='readonly')
+        self.quality_combo.pack(side='left', padx=4)
+        self.quality_combo.bind('<<ComboboxSelected>>',
+                                lambda e: self._on_quality_preset_changed())
+
+        # CRF / codec / preset (manual)
         self._row_with_help(wr, 'Quality CRF', bi(
             '0 = lossless, 18 = visually lossless, 28 = small files, 51 = artifact art.',
             '0 — без потерь, 18 — визуально без потерь, 28 — малый размер, 51 — арт из '
@@ -1042,13 +1114,15 @@ class MainGUI(tk.Tk):
             'H.264 — универсально. H.265 — меньше файл, медленнее кодирование, хуже '
             'совместимость.'))
         cf = tk.Frame(wr, bg=C_SILVER); cf.pack(fill='x', padx=20, pady=2)
+        # Codec list is filtered at startup against `ffmpeg -encoders` —
+        # HW variants (NVENC/QSV/AMF/VideoToolbox) only show up if the
+        # local ffmpeg build actually supports them. The runtime-side
+        # fallback in engine.py covers the case where the encoder is
+        # listed but fails to initialize (no driver, GPU busy, etc.).
+        codec_labels = [s.label for s in available_encoder_specs()]
         self.fmt_combo = ttk.Combobox(
-            cf,
-            values=['H.264 (MP4)', 'H.265 (MP4)',
-                    'H.264 (MKV)', 'H.265 (MKV)',
-                    'H.264 (MOV)', 'ProRes (MOV)',
-                    'VP9 (WebM)'],
-            style='W95.TCombobox', width=18, state='readonly')
+            cf, values=codec_labels,
+            style='W95.TCombobox', width=26, state='readonly')
         self.fmt_combo.set('H.264 (MP4)'); self.fmt_combo.pack(side='left', padx=4)
 
         self._row_with_help(wr, 'ffmpeg Preset', bi(
@@ -1059,6 +1133,34 @@ class MainGUI(tk.Tk):
             ef, values=['ultrafast', 'fast', 'medium', 'slow'],
             style='W95.TCombobox', width=12)
         self.preset_enc_combo.set('medium'); self.preset_enc_combo.pack(side='left', padx=4)
+        self.preset_enc_combo.bind('<<ComboboxSelected>>',
+                                   lambda e: self._refresh_quality_label())
+
+        # Tune — x264/x265-only film/grain/animation/stillimage hint.
+        # 'none' means the flag is omitted entirely. Available for non-
+        # x264/x265 codecs but ignored downstream (see sink.py).
+        self._row_with_help(wr, 'Tune', bi(
+            'x264/x265 -tune hint. film = clean live action, grain = preserves '
+            'noise (good for datamosh/glitch material), animation, stillimage. '
+            "'none' = no -tune flag. Ignored for non-x264/x265 codecs.",
+            'Подсказка -tune для x264/x265. film — чистое видео, grain — сохраняет '
+            'шум (полезно для datamosh/глитча), animation, stillimage. '
+            "'none' — флаг не передаётся. Игнорируется для других кодеков."))
+        tf = tk.Frame(wr, bg=C_SILVER); tf.pack(fill='x', padx=20, pady=2)
+        self.tune_combo = ttk.Combobox(
+            tf, values=list(TUNE_VALUES), textvariable=self.var_tune,
+            style='W95.TCombobox', width=12, state='readonly')
+        self.tune_combo.pack(side='left', padx=4)
+        self.tune_combo.bind('<<ComboboxSelected>>',
+                             lambda e: self._refresh_quality_label())
+
+        # Manual CRF edits → flip quality dropdown to Custom. Trace is
+        # added once here, after var_quality_preset exists. The reentrancy
+        # guard protects against trace firing while a preset is being
+        # applied (which writes crf itself).
+        self.vars['crf'].trace_add('write',
+                                   lambda *_: self._refresh_quality_label())
+        self._refresh_quality_label()
 
     # ─── FORMULA panel (TUI-styled, dedicated tab) ───
     FORMULA_SNIPPETS = [
@@ -1580,6 +1682,9 @@ class MainGUI(tk.Tk):
         cfg['resolution_mode'] = self.var_resolution_mode.get()
         cfg['export_preset'] = self.preset_enc_combo.get() if hasattr(self, 'preset_enc_combo') else 'medium'
         cfg['video_codec'] = self.fmt_combo.get() if hasattr(self, 'fmt_combo') else 'H.264 (MP4)'
+        cfg['tune'] = self.var_tune.get() if hasattr(self, 'var_tune') else 'none'
+        cfg['quality_preset'] = (self.var_quality_preset.get()
+                                 if hasattr(self, 'var_quality_preset') else 'Custom')
         cfg['silence_mode'] = self.var_silence_mode.get()
 
         cfg['fx_ascii_fg'] = [int(cfg.pop('fx_ascii_fg_r', 0)),
@@ -1719,6 +1824,23 @@ class MainGUI(tk.Tk):
         self.preset_enc_combo.set(cfg.get('export_preset', 'medium'))
         if hasattr(self, 'fmt_combo') and cfg.get('video_codec'):
             self.fmt_combo.set(cfg['video_codec'])
+        # Tune + Quality dropdown. Apply tune from cfg (default 'none' if
+        # absent — old presets predate this field). Then trust the saved
+        # quality_preset label if present, otherwise re-derive it from
+        # the (crf, export_preset, tune) triple. Apply through the guard
+        # so traces don't fight each other.
+        if hasattr(self, 'var_tune'):
+            self._applying_quality = True
+            try:
+                self.var_tune.set(cfg.get('tune', 'none') or 'none')
+            finally:
+                self._applying_quality = False
+        if hasattr(self, 'var_quality_preset'):
+            saved_label = cfg.get('quality_preset')
+            if saved_label and saved_label in QUALITY_PRESETS:
+                self.var_quality_preset.set(saved_label)
+            else:
+                self._refresh_quality_label()
         self.log(f"Preset '{name}' loaded.")
 
     def _load_selected_preset(self):

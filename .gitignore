@@ -22,6 +22,12 @@ temp_preview.mp4
 !rt_cpp/vcpkg-configuration.json
 
 *.log
+nvenc_out.txt
+
+# Bench artefacts — synthesised fixtures and per-run outputs. The
+# bench script itself (tools/bench_render.py) IS tracked.
+tools/.bench_fixtures/
+tools/.bench_out/
 
 *.mp4
 *.mov

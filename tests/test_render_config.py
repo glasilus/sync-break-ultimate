@@ -27,7 +27,17 @@ def test_resolution_draft_override():
 
 def test_resolution_match_source():
     rc = RenderConfig({'resolution_mode': 'source'})
-    assert rc.output_size(RENDER_FINAL, source_size=(1234, 567)) == (1234, 567)
+    # Even dimensions pass through unchanged.
+    assert rc.output_size(RENDER_FINAL, source_size=(1234, 568)) == (1234, 568)
+
+
+def test_resolution_match_source_rounds_odd_to_even():
+    """yuv420p chroma subsampling requires even dims — odd source sizes
+    must be rounded down by one pixel to keep ffmpeg from refusing the
+    pipe."""
+    rc = RenderConfig({'resolution_mode': 'source'})
+    assert rc.output_size(RENDER_FINAL, source_size=(1234, 567)) == (1234, 566)
+    assert rc.output_size(RENDER_FINAL, source_size=(1235, 567)) == (1234, 566)
 
 
 def test_resolution_custom():

@@ -102,6 +102,33 @@ class RenderConfig:
         return 'H.265' in self.raw.get('video_codec', 'H.264')
 
     @property
+    def tune(self) -> str:
+        """libx264/libx265 -tune value. 'none' (or empty) = don't pass it.
+
+        Stored as a flat string because Quality presets and the GUI both
+        treat it as one of {'none', 'film', 'grain', 'animation',
+        'stillimage'}. See vpc.render.quality.normalize_tune for the
+        canonical list.
+        """
+        v = self.raw.get('tune')
+        if v is None:
+            return 'none'
+        s = str(v).strip().lower()
+        return s if s else 'none'
+
+    @property
+    def quality_preset(self) -> str:
+        """Quality preset label ('Archive'/'High'/'Web'/'Compact'/'Custom').
+
+        Purely informational — actual encoder flags are derived from
+        crf/export_preset/tune, which the preset only fills in. Keeping
+        the label in cfg lets saved presets remember which Quality the
+        user picked, so re-loading the preset shows the same dropdown
+        selection."""
+        v = self.raw.get('quality_preset')
+        return str(v) if v else 'Custom'
+
+    @property
     def video_codec_label(self) -> str:
         """User-facing codec/container label, e.g. 'H.264 (MP4)'.
 

@@ -47,29 +47,50 @@ class FFmpegSink:
                  pix_fmt: str = 'yuv420p',
                  preset: str = 'medium',
                  crf: int = 18, target_duration: Optional[float] = None,
-                 extra_v_flags: Optional[list] = None):
+                 extra_v_flags: Optional[list] = None,
+                 tune: Optional[str] = None,
+                 input_pix_fmt: Optional[str] = None,
+                 rate_control_args: Optional[list] = None):
         self.width = width
         self.height = height
         self.fps = fps
         self.output_path = output_path
         self._proc: Optional[subprocess.Popen] = None
+        # Auto-pick input pix_fmt: when output is yuv420p we can feed
+        # planar I420 (1.5 bytes/pixel) instead of RGB24 (3 bytes/pixel),
+        # halving pipe bandwidth. For 10-bit / 4:2:2 outputs (ProRes) we
+        # stay on rgb24 — converting through I420 would lose chroma
+        # detail before ffmpeg even gets the frame.
+        if input_pix_fmt is None:
+            input_pix_fmt = 'yuv420p' if pix_fmt == 'yuv420p' else 'rgb24'
+        self.input_pix_fmt = input_pix_fmt
         ext = os.path.splitext(output_path)[1].lower().lstrip('.')
         self._cmd = [
             ffmpeg_bin(), '-y',
             '-f', 'rawvideo', '-vcodec', 'rawvideo',
             '-s', f'{width}x{height}',
-            '-pix_fmt', 'rgb24',
+            '-pix_fmt', input_pix_fmt,
             '-r', str(fps),
             '-i', 'pipe:0',
             '-i', audio_path,
             '-vcodec', vcodec,
             '-pix_fmt', pix_fmt,
         ]
-        # libvpx-vp9 / prores_ks don't take -preset/-crf the same way as x264/x265.
-        if vcodec in ('libx264', 'libx265'):
+        # Rate-control flags. Two paths:
+        #   1. If `rate_control_args` is supplied, use it verbatim — this
+        #      is the encoders.py-driven path (needed for HW encoders
+        #      whose flags don't match the x264 family). Engine builds
+        #      these via `build_rate_control_args(spec, crf, preset, tune)`.
+        #   2. Otherwise the legacy auto-pick: x264/x265 get -preset/-crf
+        #      (+ -tune), VP9 gets -crf/-deadline. This branch is what
+        #      the sink-only callers and existing tests exercise.
+        if rate_control_args is not None:
+            self._cmd.extend(rate_control_args)
+        elif vcodec in ('libx264', 'libx265'):
             self._cmd.extend(['-preset', preset, '-crf', str(crf)])
+            if tune and str(tune).lower() not in ('', 'none'):
+                self._cmd.extend(['-tune', str(tune).lower()])
         elif vcodec == 'libvpx-vp9':
-            # Map CRF to VP9 CRF (same scale, 0–63 nominally).
             self._cmd.extend(['-crf', str(crf), '-deadline', 'good',
                               '-cpu-used', '4'])
         if extra_v_flags:
@@ -89,14 +110,40 @@ class FFmpegSink:
     def open(self):
         self._proc = subprocess.Popen(
             self._cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        # Drain stderr in background to keep ffmpeg's pipe buffer from filling.
-        def _drain(pipe):
+        # Capture stderr instead of just dropping it — ffmpeg writes the
+        # encoder init failure (`Cannot load nvcuda.dll`, `No NVENC
+        # capable devices`, etc.) here, and the engine needs to read it
+        # to decide whether to fall back to libx264.
+        self._stderr_chunks: list[bytes] = []
+
+        def _drain(pipe, sink):
             try:
-                pipe.read()
+                while True:
+                    chunk = pipe.read(4096)
+                    if not chunk:
+                        break
+                    sink.append(chunk)
             except Exception:
                 pass
-        threading.Thread(target=_drain, args=(self._proc.stderr,), daemon=True).start()
+        threading.Thread(target=_drain, args=(self._proc.stderr,
+                                              self._stderr_chunks),
+                         daemon=True).start()
         return self
+
+    def early_failure(self, wait: float = 0.4) -> Optional[str]:
+        """If ffmpeg has already exited (typical for HW encoder init
+        failures — they die before the first frame is written), wait up
+        to `wait` seconds and return the captured stderr tail. Returns
+        None if the process is still alive and accepting bytes."""
+        if self._proc is None:
+            return 'sink not open'
+        try:
+            self._proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            return None  # still running — assume OK
+        # Process died; gather stderr.
+        tail = b''.join(self._stderr_chunks).decode(errors='replace')
+        return tail[-2000:] if tail else f'ffmpeg exited (rc={self._proc.returncode})'
 
     def write(self, frame_bytes: bytes) -> bool:
         if self._proc is None or self._proc.stdin is None:
