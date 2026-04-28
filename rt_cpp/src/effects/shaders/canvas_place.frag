@@ -48,6 +48,9 @@ void main() {
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
     } else {
-        fragColor = texture(uTex, uv);
+        // sws_scale writes the source frame top-left, GL samples bottom-left.
+        // Flip V here (and only here) so subsequent effect passes — which read
+        // GL-convention FBO textures — don't double-flip the result.
+        fragColor = texture(uTex, vec2(uv.x, 1.0 - uv.y));
     }
 }

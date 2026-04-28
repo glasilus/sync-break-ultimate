@@ -174,13 +174,27 @@ bool VideoSource::decode_next(DecodedFrame& out, int /*w*/, int /*h*/) {
 
 void VideoSource::decode_thread_fn() {
     while (!stop_thread_.load()) {
+        // Honour pending seek requests at the top of the loop so they pre-empt
+        // any in-flight decode. We drop already-decoded frames from the queue —
+        // they belong to the OLD position and would replay over the cut.
+        if (seek_request_.exchange(false)) {
+            seek_random();
+            std::lock_guard<std::mutex> lk(queue_mutex_);
+            ready_queue_.clear();
+            // Force pump_uploads to fast-fill (skip pacing window) so new
+            // post-seek frames hit the screen on the very next render tick.
+            last_upload_time_ = 0.0;
+        }
+
         {
             std::unique_lock<std::mutex> lk(queue_mutex_);
             queue_cv_.wait(lk, [&]{
-                return stop_thread_.load() || (int)ready_queue_.size() < kTexPoolSize;
+                return stop_thread_.load() || seek_request_.load() ||
+                       (int)ready_queue_.size() < kTexPoolSize;
             });
         }
         if (stop_thread_.load()) break;
+        if (seek_request_.load()) continue;  // restart loop to handle seek
 
         DecodedFrame frame;
         if (decode_next(frame, 0, 0)) {

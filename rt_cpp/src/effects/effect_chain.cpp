@@ -135,14 +135,13 @@ EffectChain::EffectChain()  = default;
 EffectChain::~EffectChain() { destroy(); }
 
 void EffectChain::setup_quad() {
-    // UV V flipped: sws_scale writes top-left origin, GL samples bottom-left.
     static const float verts[] = {
-        -1.f,-1.f, 0.f,1.f,
-         1.f,-1.f, 1.f,1.f,
-        -1.f, 1.f, 0.f,0.f,
-         1.f,-1.f, 1.f,1.f,
-         1.f, 1.f, 1.f,0.f,
-        -1.f, 1.f, 0.f,0.f,
+        -1.f,-1.f, 0.f,0.f,
+         1.f,-1.f, 1.f,0.f,
+        -1.f, 1.f, 0.f,1.f,
+         1.f,-1.f, 1.f,0.f,
+         1.f, 1.f, 1.f,1.f,
+        -1.f, 1.f, 0.f,1.f,
     };
     glGenVertexArrays(1, &quad_vao_);
     glGenBuffers(1, &quad_vbo_);
@@ -460,7 +459,16 @@ GLuint EffectChain::apply(
     //     applied" contract that shaders expect.
     const float seg_boost   = std::sqrt(std::clamp(seg.intensity, 0.f, 1.f));
     const float drive       = std::clamp(chaos * (0.6f + 0.4f * master_intensity), 0.f, 1.f);
-    const float fi_base     = std::clamp(0.25f + 1.4f * drive * seg_boost, 0.f, 1.f);
+    // No floor: silence (seg.intensity == 0) → fi_base == 0 → effects do
+    // nothing visible. The previous 0.25 floor caused every enabled effect to
+    // fire at 25 % even in dead silence, which read as "overreacting".
+    const float fi_base     = std::clamp(1.4f * drive * seg_boost, 0.f, 1.f);
+
+    // Audio gate for fire(): below this segment intensity we skip random fires
+    // entirely. Otherwise the chance roll keeps triggering effects in silence
+    // even though their visual intensity is now 0 — wasting GPU and producing
+    // momentary artifacts on effects that have non-multiplicative components.
+    const bool  audio_active = (seg.intensity > 0.02f);
 
     // Place the input onto the canvas with correct aspect handling. If we
     // don't have usable dimensions yet (no decoded frame this tick) or the
@@ -486,9 +494,10 @@ GLuint EffectChain::apply(
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    // Helper: fire if enabled + probability check
+    // Helper: fire if enabled + audio is non-silent + probability check.
+    // The audio_active gate is what kills "effects flickering in silence".
     auto fire = [&](FxId id) -> bool {
-        return params[(int)id].enabled && fires(params[(int)id].chance);
+        return params[(int)id].enabled && audio_active && fires(params[(int)id].chance);
     };
 
     // Grab history references (safe — all pre-allocated)

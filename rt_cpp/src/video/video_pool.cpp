@@ -44,6 +44,11 @@ GLuint VideoPool::get_random_frame(int w, int h, int* out_w, int* out_h) {
     int idx = (active_idx_ >= 0 && active_idx_ < (int)sources_.size())
             ? active_idx_
             : rand() % (int)sources_.size();
+    // Hybrid cut: instant visual change via the cached tex pool (1 render
+    // frame latency), real "jump to a different part of the video" lands a
+    // few frames later via the background seek. Seek is non-blocking so the
+    // render thread never stalls.
+    sources_[idx]->request_seek_random();
     return sources_[idx]->get_random_frame(w, h, out_w, out_h);
 }
 

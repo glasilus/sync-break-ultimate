@@ -77,8 +77,16 @@ public:
     // VideoPool reads this to advance round-robin between sources.
     int              loop_count() const { return loop_count_; }
     double           native_fps()  const { return src_fps_; }
+
+    // Asks the decoder thread to seek to a random position. Returns
+    // immediately (non-blocking). The pool uses this on cut events to make
+    // each cut land on a different part of the video — visual response stays
+    // 1 render frame because get_random_frame still returns a cached tex
+    // before the seek lands.
+    void             request_seek_random() { seek_request_.store(true); queue_cv_.notify_all(); }
 private:
-    std::atomic<int> loop_count_{0};
+    std::atomic<int>  loop_count_{0};
+    std::atomic<bool> seek_request_{false};
 
     // GL texture pool — dimensions tracked per-slot because decode runs at
     // native resolution (which can vary if we ever cache mixed-size frames).
