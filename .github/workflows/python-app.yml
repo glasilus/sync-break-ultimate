@@ -65,6 +65,8 @@ jobs:
             --icon CDDRIVE.ico ^
             --splash CDDRIVE.png ^
             --manifest tools/disc_vpc_utf8.manifest ^
+            --additional-hooks-dir tools/pyi_hooks ^
+            --runtime-hook tools/pyi_rth_inner_dll_libs.py ^
             --add-data "CDDRIVE.png;." ^
             --collect-all numpy ^
             --collect-all PIL ^
@@ -187,6 +189,7 @@ jobs:
             --onefile --windowed --clean --noupx \
             --name DiscVPC01 \
             --icon CDDRIVE.icns \
+            --additional-hooks-dir tools/pyi_hooks \
             --add-data "CDDRIVE.png:." \
             --collect-all numpy \
             --collect-all PIL \
@@ -391,6 +394,7 @@ jobs:
             --onefile --noconsole --clean --noupx \
             --name DiscVPC01 \
             --splash CDDRIVE.png \
+            --additional-hooks-dir tools/pyi_hooks \
             --add-data "CDDRIVE.png:." \
             --collect-all numpy \
             --collect-all PIL \
