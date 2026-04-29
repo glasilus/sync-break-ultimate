@@ -58,8 +58,13 @@ class MysterySection:
         # accumulator is also the source ENTROPY_7 grows inside.
         self._vessel_accum: np.ndarray | None = None
         # ZERO needs a deep buffer (≈4 seconds at 30fps) to recall from.
+        # Capped both by frame count and by total bytes — at 1080p uint8
+        # 120 frames is ~750 MB, which is excessive for tools that can run
+        # alongside the GUI. The byte cap (~256 MB) lowers `_zero_history_max`
+        # adaptively the first time `apply()` sees a full-resolution frame.
         self._zero_history: list[np.ndarray] = []
         self._zero_history_max = 120
+        self._zero_history_byte_cap = 256 * 1024 * 1024
         # Internal phase counter for VESSEL's wandering polar centre.
         self._t = 0
 
@@ -70,6 +75,12 @@ class MysterySection:
         # VESSEL's accumulator is updated on every frame regardless of which
         # knobs are non-zero. Otherwise turning a knob on would suddenly find
         # an empty buffer and pop visually.
+        # Adaptive cap: the first sample tells us frame size; clamp the
+        # history length so the buffer fits under `_zero_history_byte_cap`.
+        if not self._zero_history:
+            per_frame = max(1, int(frame.nbytes))
+            adaptive = max(8, self._zero_history_byte_cap // per_frame)
+            self._zero_history_max = min(self._zero_history_max, adaptive)
         self._zero_history.append(frame.copy())
         if len(self._zero_history) > self._zero_history_max:
             self._zero_history.pop(0)

@@ -11,6 +11,7 @@ import os
 import random
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 import cv2
@@ -41,6 +42,34 @@ from ..registry import build_chain
 from ..effects.core import FlashEffect
 
 
+@dataclass
+class _RenderCtx:
+    """Shared state passed to the per-mode render loops.
+
+    Mutable fields (`frames_emitted`) live here so `run()` can inspect what
+    the loop produced after a BrokenPipeError, even though the loop returned
+    early.
+    """
+    sink: 'FFmpegSink'
+    pool: 'VideoPool'
+    segments: List[Segment]
+    effects: list
+    mystery: object
+    flash_fx: object
+    out_w: int
+    out_h: int
+    fps: int
+    target_duration: float
+    target_total_frames: int
+    is_draft: bool
+    is_final: bool
+    chaos: float
+    flash_chance: float
+    datamosh_cap: object = None
+    datamosh_total_frames: int = 0
+    frames_emitted: int = 0
+
+
 class BreakcoreEngine:
     """Render orchestrator. Public API:
 
@@ -57,6 +86,9 @@ class BreakcoreEngine:
         self.progress_callback = progress_callback
         self.abort = False
         self.scene_cuts: List[float] = []
+        # Path to a temp wav extracted from the source video in passthrough
+        # mode. Tracked so the cleanup branch in run() can delete it.
+        self._tmp_audio_to_clean: Optional[str] = None
 
     # ----- logging -----
     def log(self, message: str, value: Optional[int] = None):
@@ -101,6 +133,45 @@ class BreakcoreEngine:
         else:
             t = random.uniform(0, max(0, video_duration - seg_duration))
         return max(0.0, min(t, video_duration - seg_duration - 0.1))
+
+    def _cleanup_tmp_audio(self) -> None:
+        """Delete the passthrough-extracted temp WAV if any. Idempotent."""
+        p = self._tmp_audio_to_clean
+        if p and os.path.exists(p):
+            try: os.remove(p)
+            except OSError: pass
+        self._tmp_audio_to_clean = None
+
+    # ----- passthrough audio extraction -----
+    def _extract_audio_track(self, video_path: str) -> Optional[str]:
+        """Demux the audio of `video_path` into a temp WAV; return its path.
+
+        Returns None if the video has no audio stream or extraction fails —
+        in that case the engine still renders, but with no segments and no
+        audio in the output.
+        """
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        tmp.close()
+        cmd = [
+            ffmpeg_bin(), '-y', '-i', video_path,
+            '-vn', '-ac', '2', '-ar', '44100', '-sample_fmt', 's16',
+            tmp.name,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            self.log(f'Audio extraction failed: {exc}')
+            try: os.remove(tmp.name)
+            except OSError: pass
+            return None
+        if result.returncode != 0 or os.path.getsize(tmp.name) == 0:
+            err = (result.stderr or b'')[:200].decode(errors='replace').strip()
+            self.log(f'Audio extraction: no track / ffmpeg error ({err}).')
+            try: os.remove(tmp.name)
+            except OSError: pass
+            return None
+        return tmp.name
 
     # ----- datamosh helper -----
     def _prepare_datamosh_source(self, video_path: str, output_path: str) -> bool:
@@ -211,47 +282,117 @@ class BreakcoreEngine:
         audio_path = rc.audio_path
         output_path = rc.output_path
 
-        if not os.path.exists(audio_path):
+        # Passthrough mode pulls audio from the source video. If the user
+        # also picked an external audio file we still prefer the extracted
+        # track — passthrough means "everything from this one video".
+        if rc.passthrough_mode:
+            if not video_paths:
+                self.log('ERROR: passthrough mode requires a source video.')
+                return False
+            if len(video_paths) > 1:
+                self.log(f'Passthrough: {len(video_paths)} sources loaded — '
+                         f'using only the first ({os.path.basename(video_paths[0])}).')
+            self.log('Passthrough: extracting audio from source video...')
+            extracted = self._extract_audio_track(video_paths[0])
+            if extracted is None:
+                self.log('Passthrough: source has no readable audio. '
+                         'Render will continue without effects.')
+                audio_path = ''
+            else:
+                audio_path = extracted
+                self._tmp_audio_to_clean = extracted
+
+        if audio_path and not os.path.exists(audio_path):
             self.log(f'ERROR: audio file not found: {audio_path}')
+            self._cleanup_tmp_audio()
             return False
 
+        # Outer guard around setup + render: guarantees the temp WAV
+        # extracted in passthrough mode is removed even if anything between
+        # here and the inner pool/sink finally raises (analyzer constructor,
+        # VideoPool, encoder probe, sink open, …).
+        try:
+            return self._run_inner(render_mode, max_output_duration,
+                                    cfg, rc, video_paths,
+                                    audio_path, output_path)
+        finally:
+            self._cleanup_tmp_audio()
+
+    def _run_inner(self, render_mode, max_output_duration,
+                   cfg, rc, video_paths, audio_path, output_path):
         is_draft = render_mode == RENDER_DRAFT
         is_final = render_mode == RENDER_FINAL
 
         # Audio analysis runs first so we can use its duration for sizing.
-        self.log('Analyzing audio...')
-        analyzer = AudioAnalyzer(
-            audio_path,
-            min_segment_dur=rc.min_segment_dur,
-            loud_thresh=rc.loud_thresh,
-            transient_thresh=rc.transient_thresh,
-            snap_to_beat=rc.snap_to_beat,
-            snap_tolerance=rc.snap_tolerance,
-            manual_bpm=rc.manual_bpm,
-            use_manual_bpm=rc.use_manual_bpm,
-        )
-        segments, audio_duration = analyzer.analyze()
-        if audio_duration == 0.0 or not segments:
-            self.log('Warning: audio unreadable / no segments — output will have no effects.')
+        # In passthrough mode we may have no audio at all (silent video) —
+        # then segments=[] and the loop below renders a passthrough with
+        # zero effects (everything classifies as SILENCE).
+        segments: List[Segment] = []
+        audio_duration = 0.0
+        analyzer_bpm = 0.0
+        if audio_path:
+            self.log('Analyzing audio...')
+            analyzer = AudioAnalyzer(
+                audio_path,
+                min_segment_dur=rc.min_segment_dur,
+                loud_thresh=rc.loud_thresh,
+                transient_thresh=rc.transient_thresh,
+                snap_to_beat=rc.snap_to_beat,
+                snap_tolerance=rc.snap_tolerance,
+                manual_bpm=rc.manual_bpm,
+                use_manual_bpm=rc.use_manual_bpm,
+            )
+            segments, audio_duration = analyzer.analyze()
+            analyzer_bpm = analyzer.detected_bpm
+            if audio_duration == 0.0 or not segments:
+                self.log('Warning: audio unreadable / no segments — output will have no effects.')
 
-        target_duration = audio_duration
+        # Open video pool early — needed both for sizing and for picking the
+        # effective duration when running in passthrough.
+        pool = VideoPool(video_paths)
+
+        # Effective render duration. Normal mode: governed by audio length.
+        # Passthrough: governed by the source video, since output is 1:1
+        # with input frames. If audio is shorter than video we pad audio;
+        # if audio is longer we ignore the tail (no video to back it).
+        if rc.passthrough_mode:
+            target_duration = pool.vid_duration
+        else:
+            target_duration = audio_duration
         if max_output_duration:
-            target_duration = min(audio_duration, max_output_duration)
-            segments = [s for s in segments if s.t_start < target_duration]
+            target_duration = min(target_duration, max_output_duration)
+        segments = [s for s in segments if s.t_start < target_duration]
 
-        bpm_str = f' | {analyzer.detected_bpm:.1f} BPM' if analyzer.detected_bpm else ''
+        bpm_str = f' | {analyzer_bpm:.1f} BPM' if analyzer_bpm else ''
         self.log(f'Audio: {audio_duration:.1f}s | Segments: {len(segments)}{bpm_str}')
 
-        # Open video pool, then derive output size (backlog #2 needs source).
-        pool = VideoPool(video_paths)
         out_w, out_h = rc.output_size(render_mode, source_size=pool.primary_size)
         fps = rc.fps(render_mode)
+        # In passthrough mode the engine reads input frames sequentially and
+        # writes one output frame per input frame. If the user-picked output
+        # FPS differs from the source's native FPS, video would play at
+        # `out_fps / src_fps` × the audio rate — a guaranteed desync. Force
+        # output FPS to the source's native rate; tell the user we did so.
+        if rc.passthrough_mode:
+            try:
+                src_fps_native = float(pool.fps_list[0]) if pool.fps_list else 0.0
+            except (IndexError, TypeError):
+                src_fps_native = 0.0
+            if src_fps_native > 0:
+                src_fps_int = int(round(src_fps_native))
+                if src_fps_int != fps:
+                    self.log(f'Passthrough: forcing output FPS to source '
+                             f'native {src_fps_int} (was {fps}) to keep audio in sync.')
+                    fps = src_fps_int
         preset = rc.encoder_preset(render_mode)
         crf = rc.crf(render_mode)
         self.log(f'Mode: {render_mode} | {out_w}x{out_h} @ {fps}fps | '
                  f'preset={preset} crf={crf}')
 
-        self.detect_scenes(video_paths, pool.vid_duration)
+        # In passthrough mode the renderer reads frames sequentially — there
+        # is no random sampling that could benefit from scene cuts.
+        if not rc.passthrough_mode:
+            self.detect_scenes(video_paths, pool.vid_duration)
 
         # Effect chain from the registry.
         effects = build_chain({**cfg, 'overlay_dir': rc.overlay_dir})
@@ -331,10 +472,15 @@ class BreakcoreEngine:
                 sink = _open_sink(fb)
 
         # ----- datamosh pre-bake -----
+        # Passthrough mode skips datamosh prebake — the prebaked I-frame-
+        # dropped source replaces the live frames on NOISE segments, which
+        # would break the strict 1:1 input→output mapping passthrough
+        # promises. The DerivWarp/SelfDisplace effects still provide a
+        # CPU-side datamosh-style smear when enabled.
         datamosh_source_path = None
         datamosh_cap = None
         datamosh_total_frames = pool.vid_total_frames
-        if is_final and rc.datamosh_enabled:
+        if is_final and rc.datamosh_enabled and not rc.passthrough_mode:
             dm_path = output_path + '_dmosh_src.mp4'
             # Stale leftover from a previously aborted render — its missing
             # moov atom is what produces the "moov atom not found" warning
@@ -355,12 +501,9 @@ class BreakcoreEngine:
         # ----- main loop -----
         # Total target frames for the whole render. We track frames_emitted
         # against this counter — any rounding shortfall is paid back by
-        # padding with the last produced frame after the segment loop ends,
-        # so the encoded video matches audio length exactly. This is the
-        # fix for the "video ends before song" truncation bug.
+        # padding with the last produced frame after the loop ends, so the
+        # encoded video matches the target duration exactly.
         target_total_frames = int(round(target_duration * fps))
-        frames_emitted = 0
-        last_frame_bytes: Optional[bytes] = None
 
         # ETA bookkeeping. _render_t0 starts here (after analysis +
         # scene-detect + datamosh prebake) so the printed ETA reflects
@@ -369,120 +512,29 @@ class BreakcoreEngine:
         self._render_t0 = time.perf_counter()
         self._last_progress_t = 0.0
 
+        ctx = _RenderCtx(
+            sink=sink, pool=pool, segments=segments,
+            effects=effects, mystery=mystery, flash_fx=flash_fx,
+            out_w=out_w, out_h=out_h, fps=fps,
+            target_duration=target_duration,
+            target_total_frames=target_total_frames,
+            is_draft=is_draft, is_final=is_final,
+            chaos=chaos, flash_chance=flash_chance,
+            datamosh_cap=datamosh_cap,
+            datamosh_total_frames=datamosh_total_frames,
+        )
+
         try:
-            for seg_idx, seg in enumerate(segments):
-                if self.abort:
-                    break
-                seg_dur = min(seg.duration, target_duration - seg.t_start)
-                if seg_dur <= 0:
-                    break
-                # Per-segment target uses cumulative rounding: compute where
-                # the segment's tail SHOULD land in absolute frame space and
-                # subtract frames already emitted. This eliminates the
-                # accumulated half-frame loss the old `int(seg_dur * fps)`
-                # path produced over hundreds of segments.
-                seg_end_frame = int(round((seg.t_start + seg_dur) * fps))
-                seg_end_frame = min(seg_end_frame, target_total_frames)
-                n_frames = max(1, seg_end_frame - frames_emitted)
-
-                seg_cap, seg_fps, seg_total_frames, seg_duration = pool.random_cap()
-                use_datamosh_src = (
-                    is_final and datamosh_cap is not None
-                    and seg.type == SegmentType.NOISE
-                    and rc.datamosh_enabled
-                    and random.random() < rc.datamosh_chance_base
-                )
-                active_cap = datamosh_cap if use_datamosh_src else seg_cap
-                active_total_frames = (datamosh_total_frames
-                                       if use_datamosh_src else seg_total_frames)
-
-                src_t = self._get_source_time(seg_duration, seg_dur)
-                src_frame_idx = int(src_t * seg_fps)
-                active_cap.set(cv2.CAP_PROP_POS_FRAMES,
-                               min(src_frame_idx, active_total_frames - 1))
-
-                # Stutter
-                stutter_repeat = 1
-                if (rc.stutter_enabled and seg.type == SegmentType.IMPACT
-                        and seg.duration < 0.3):
-                    if random.random() < (0.3 + chaos * 0.5):
-                        stutter_repeat = random.choice([2, 4, 8])
-
-                # Flash
-                if (rc.flash_enabled
-                        and seg.type in (SegmentType.DROP, SegmentType.IMPACT)
-                        and random.random() < flash_chance):
-                    flash_frames = random.randint(1, 2)
-                    dummy = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-                    flash_frame = flash_fx._apply(dummy, seg, is_draft)
-                    flash_frame = cv2.resize(flash_frame, (out_w, out_h))
-                    flash_bytes = self._pack_frame(flash_frame, sink.input_pix_fmt)
-                    aborted = False
-                    for _ in range(flash_frames):
-                        if frames_emitted >= target_total_frames:
-                            break
-                        if not sink.write(flash_bytes):
-                            aborted = True; break
-                        frames_emitted += 1
-                        last_frame_bytes = flash_bytes
-                    if aborted:
-                        break
-
-                frames_written = 0
-                while frames_written < n_frames:
-                    ret, frame_bgr = active_cap.read()
-                    if not ret:
-                        active_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        ret, frame_bgr = active_cap.read()
-                        if not ret:
-                            break
-                    frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                    frame = cv2.resize(frame, (out_w, out_h))
-
-                    if seg.type == SegmentType.SILENCE and seg.duration > 1.0:
-                        frame = self._apply_silence(frame)
-
-                    for fx in effects:
-                        try:
-                            frame = fx.apply(frame, seg, is_draft)
-                        except Exception as e:
-                            self.log(f'Effect error ({type(fx).__name__}): {e}')
-                    try:
-                        frame = mystery.apply(frame, seg, is_draft)
-                    except Exception as e:
-                        self.log(f'Mystery error: {e}')
-
-                    fb = self._pack_frame(frame, sink.input_pix_fmt)
-                    for _ in range(stutter_repeat):
-                        if frames_emitted >= target_total_frames:
-                            break
-                        if not sink.write(fb):
-                            break
-                        frames_written += 1
-                        frames_emitted += 1
-                        last_frame_bytes = fb
-                        self._emit_progress(frames_emitted, target_total_frames)
-                        if frames_written >= n_frames:
-                            break
-                if frames_emitted >= target_total_frames:
-                    break
-
-            # ----- pad to target_total_frames -----
-            # Cover any residual gap (last segment dropped by min_segment_dur,
-            # rounding leftovers, or a track that ends in silence with no
-            # final onset). Without this, ffmpeg sees a video stream shorter
-            # than audio and the audio gets truncated at output.
-            if not self.abort and last_frame_bytes is not None:
-                pad_count = target_total_frames - frames_emitted
-                if pad_count > 0:
-                    self.log(f'Padding tail: {pad_count} frame(s) to match audio.')
-                    for _ in range(pad_count):
-                        if not sink.write(last_frame_bytes):
-                            break
-                        frames_emitted += 1
-
+            if rc.passthrough_mode:
+                frames_emitted = self._run_passthrough_loop(ctx)
+            else:
+                frames_emitted = self._run_segment_loop(ctx)
         except (BrokenPipeError, OSError):
             self.log('ffmpeg pipe closed early.')
+            frames_emitted = ctx.frames_emitted
+            # Treat pipe death as failure — without this, the success log
+            # ("Done in Xs (Y.YYx realtime)") would print after a crash.
+            self.abort = True
         finally:
             pool.release_all()
             if datamosh_cap:
@@ -491,6 +543,7 @@ class BreakcoreEngine:
                 try: os.remove(datamosh_source_path)
                 except OSError: pass
             sink.close()
+            # Temp WAV cleanup is handled by the outer guard in run().
 
         if not self.abort:
             elapsed = time.perf_counter() - self._render_t0
@@ -499,3 +552,225 @@ class BreakcoreEngine:
                      f'({rt_factor:.2f}x realtime). Output: {output_path}')
             return True
         return False
+
+    # ----- segment-cut loop (default mode) -----
+    def _run_segment_loop(self, ctx: '_RenderCtx') -> int:
+        """Original cut-and-paste rendering path: per-segment random source
+        time, stutter/flash insertion, datamosh swap on NOISE.
+
+        Returns the number of frames actually written to the sink.
+        """
+        rc = self.config
+        sink = ctx.sink; pool = ctx.pool
+        last_frame_bytes: Optional[bytes] = None
+
+        for seg in ctx.segments:
+            if self.abort:
+                break
+            seg_dur = min(seg.duration, ctx.target_duration - seg.t_start)
+            if seg_dur <= 0:
+                break
+            # Per-segment target uses cumulative rounding: compute where
+            # the segment's tail SHOULD land in absolute frame space and
+            # subtract frames already emitted. This eliminates the
+            # accumulated half-frame loss the old `int(seg_dur * fps)`
+            # path produced over hundreds of segments.
+            seg_end_frame = int(round((seg.t_start + seg_dur) * ctx.fps))
+            seg_end_frame = min(seg_end_frame, ctx.target_total_frames)
+            n_frames = max(1, seg_end_frame - ctx.frames_emitted)
+
+            seg_cap, seg_fps, seg_total_frames, seg_duration = pool.random_cap()
+            use_datamosh_src = (
+                ctx.is_final and ctx.datamosh_cap is not None
+                and seg.type == SegmentType.NOISE
+                and rc.datamosh_enabled
+                and random.random() < rc.datamosh_chance_base
+            )
+            active_cap = ctx.datamosh_cap if use_datamosh_src else seg_cap
+            active_total_frames = (ctx.datamosh_total_frames
+                                   if use_datamosh_src else seg_total_frames)
+
+            src_t = self._get_source_time(seg_duration, seg_dur)
+            src_frame_idx = int(src_t * seg_fps)
+            active_cap.set(cv2.CAP_PROP_POS_FRAMES,
+                           min(src_frame_idx, active_total_frames - 1))
+
+            # Stutter
+            stutter_repeat = 1
+            if (rc.stutter_enabled and seg.type == SegmentType.IMPACT
+                    and seg.duration < 0.3):
+                if random.random() < (0.3 + ctx.chaos * 0.5):
+                    stutter_repeat = random.choice([2, 4, 8])
+
+            # Flash
+            if (rc.flash_enabled
+                    and seg.type in (SegmentType.DROP, SegmentType.IMPACT)
+                    and random.random() < ctx.flash_chance):
+                flash_frames = random.randint(1, 2)
+                dummy = np.zeros((ctx.out_h, ctx.out_w, 3), dtype=np.uint8)
+                flash_frame = ctx.flash_fx._apply(dummy, seg, ctx.is_draft)
+                flash_frame = cv2.resize(flash_frame, (ctx.out_w, ctx.out_h))
+                flash_bytes = self._pack_frame(flash_frame, sink.input_pix_fmt)
+                aborted = False
+                for _ in range(flash_frames):
+                    if ctx.frames_emitted >= ctx.target_total_frames:
+                        break
+                    if not sink.write(flash_bytes):
+                        aborted = True; break
+                    ctx.frames_emitted += 1
+                    last_frame_bytes = flash_bytes
+                if aborted:
+                    break
+
+            frames_written = 0
+            while frames_written < n_frames:
+                ret, frame_bgr = active_cap.read()
+                if not ret:
+                    active_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame_bgr = active_cap.read()
+                    if not ret:
+                        break
+                frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                frame = cv2.resize(frame, (ctx.out_w, ctx.out_h))
+
+                if seg.type == SegmentType.SILENCE and seg.duration > 1.0:
+                    frame = self._apply_silence(frame)
+
+                for fx in ctx.effects:
+                    try:
+                        frame = fx.apply(frame, seg, ctx.is_draft)
+                    except Exception as e:
+                        self.log(f'Effect error ({type(fx).__name__}): {e}')
+                try:
+                    frame = ctx.mystery.apply(frame, seg, ctx.is_draft)
+                except Exception as e:
+                    self.log(f'Mystery error: {e}')
+
+                fb = self._pack_frame(frame, sink.input_pix_fmt)
+                for _ in range(stutter_repeat):
+                    if ctx.frames_emitted >= ctx.target_total_frames:
+                        break
+                    if not sink.write(fb):
+                        break
+                    frames_written += 1
+                    ctx.frames_emitted += 1
+                    last_frame_bytes = fb
+                    self._emit_progress(ctx.frames_emitted, ctx.target_total_frames)
+                    if frames_written >= n_frames:
+                        break
+            if ctx.frames_emitted >= ctx.target_total_frames:
+                break
+
+        # Tail-pad: cover any rounding shortfall so video matches audio.
+        if not self.abort and last_frame_bytes is not None:
+            pad_count = ctx.target_total_frames - ctx.frames_emitted
+            if pad_count > 0:
+                self.log(f'Padding tail: {pad_count} frame(s) to match audio.')
+                for _ in range(pad_count):
+                    if not sink.write(last_frame_bytes):
+                        break
+                    ctx.frames_emitted += 1
+        return ctx.frames_emitted
+
+    # ----- passthrough loop (1:1 source → output) -----
+    def _run_passthrough_loop(self, ctx: '_RenderCtx') -> int:
+        """Read frames sequentially from the source video; map each frame's
+        timestamp to a segment via a monotonic linear cursor (frames advance
+        in order, so a full binary search isn't needed). No stutter/flash
+        insertion,
+        no random sampling, no datamosh swap — every input frame yields
+        exactly one output frame so the original audio stays in sync.
+
+        If `segments` is empty (no audio / extraction failed), every frame
+        is rendered with a synthesised SILENCE segment, i.e. effects gated
+        on non-silence types stay quiet.
+        """
+        sink = ctx.sink; pool = ctx.pool
+        cap, src_fps, src_total, _src_dur = pool.primary_cap()
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Synthetic SILENCE used both as a leading "before any segment" filler
+        # and as a fallback when there is no audio at all. If the first real
+        # segment starts at t > 0 (audio begins with silence the analyzer
+        # skipped), prepend this gap-filler to avoid retroactively painting
+        # frames before t_start with the first segment's type.
+        idle_seg = Segment(
+            t_start=0.0, t_end=ctx.target_duration,
+            duration=ctx.target_duration, type=SegmentType.SILENCE,
+            intensity=0.0, rms=0.0, flatness=0.0, rms_change=0.0,
+        )
+
+        # Linear cursor over `seg_starts`: frames advance monotonically so
+        # binary search isn't worth it.
+        if ctx.segments and ctx.segments[0].t_start > 0:
+            seg_list: List[Segment] = [Segment(
+                t_start=0.0, t_end=ctx.segments[0].t_start,
+                duration=ctx.segments[0].t_start, type=SegmentType.SILENCE,
+                intensity=0.0, rms=0.0, flatness=0.0, rms_change=0.0,
+            )] + list(ctx.segments)
+        else:
+            seg_list = list(ctx.segments)
+        seg_starts = [s.t_start for s in seg_list]
+        n_segs = len(seg_list)
+        cursor = 0
+
+        last_frame_bytes: Optional[bytes] = None
+        for fi in range(ctx.target_total_frames):
+            if self.abort:
+                break
+            ret, frame_bgr = cap.read()
+            if not ret:
+                if fi == 0:
+                    # First read failed — sink would hang on a zero-frame
+                    # video stream + non-zero audio. Bail loudly.
+                    self.log('ERROR: passthrough failed on first frame — '
+                             'source video unreadable.')
+                    self.abort = True
+                # Source ran out earlier than target_total_frames — pad
+                # with the last good frame (if any) so audio doesn't get
+                # truncated by ffmpeg.
+                break
+            t = fi / ctx.fps
+            if n_segs > 0:
+                while cursor + 1 < n_segs and seg_starts[cursor + 1] <= t:
+                    cursor += 1
+                seg = seg_list[cursor]
+            else:
+                seg = idle_seg
+
+            frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            if frame.shape[0] != ctx.out_h or frame.shape[1] != ctx.out_w:
+                frame = cv2.resize(frame, (ctx.out_w, ctx.out_h))
+
+            if seg.type == SegmentType.SILENCE and seg.duration > 1.0:
+                frame = self._apply_silence(frame)
+
+            for fx in ctx.effects:
+                try:
+                    frame = fx.apply(frame, seg, ctx.is_draft)
+                except Exception as e:
+                    self.log(f'Effect error ({type(fx).__name__}): {e}')
+            try:
+                frame = ctx.mystery.apply(frame, seg, ctx.is_draft)
+            except Exception as e:
+                self.log(f'Mystery error: {e}')
+
+            fb = self._pack_frame(frame, sink.input_pix_fmt)
+            if not sink.write(fb):
+                break
+            ctx.frames_emitted += 1
+            last_frame_bytes = fb
+            self._emit_progress(ctx.frames_emitted, ctx.target_total_frames)
+
+        # Tail-pad if source video was shorter than target_total_frames.
+        if not self.abort and last_frame_bytes is not None:
+            pad_count = ctx.target_total_frames - ctx.frames_emitted
+            if pad_count > 0:
+                self.log(f'Padding tail: {pad_count} frame(s) (source ran out).')
+                for _ in range(pad_count):
+                    if not sink.write(last_frame_bytes):
+                        break
+                    ctx.frames_emitted += 1
+        return ctx.frames_emitted
+
+

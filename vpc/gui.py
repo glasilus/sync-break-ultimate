@@ -93,6 +93,20 @@ PRESETS = {
 # The list is curated by the user — these are effects that directly mess
 # with RGB channels or the source palette in a way that breaks "color
 # fidelity" of the input video.
+# Effects that materially break passthrough's 1:1 input→output frame
+# mapping by inserting extra frames into the stream (Stutter duplicates
+# frames, Flash inserts a 1–2 frame strobe, Datamosh swaps to a prebaked
+# I-frame-dropped source). Their blocks are pack_forget()-ed when
+# passthrough mode is on, exactly like COLOR_EFFECT_KEYS does for
+# hide-color-fx, and their cfg flags are forced off so the engine can't
+# accidentally trip them either.
+PASSTHROUGH_HIDDEN_KEYS = (
+    'fx_stutter',
+    'fx_flash',
+    'fx_datamosh',
+)
+
+
 COLOR_EFFECT_KEYS = (
     'fx_flash',          # Flash Frame
     'fx_rgb',            # RGB Shift
@@ -248,6 +262,7 @@ class MainGUI(tk.Tk):
             'min_cut_duration': 0.05, 'scene_buffer_size': 10.0,
             'use_scene_detect': False, 'snap_to_beat': False, 'snap_tolerance': 0.05,
             'use_manual_bpm': False, 'manual_bpm': 120.0,
+            'passthrough_mode': False,
         }
         # Export
         export_defaults = {'fps': 24.0, 'crf': 18.0, 'custom_w': 1280.0, 'custom_h': 720.0}
@@ -278,6 +293,9 @@ class MainGUI(tk.Tk):
         # Hide-color-effects checkbox state + snapshot taken when toggled on
         self.var_hide_color_fx = tk.BooleanVar(value=False)
         self._color_fx_snapshot: dict = {}
+        # Passthrough snapshot mirrors `_color_fx_snapshot`: stores user's
+        # original choices for keys we force off while passthrough is on.
+        self._passthrough_snapshot: dict = {}
         self.var_resolution_mode = tk.StringVar(value='preset')
         self.var_formula_expr = tk.StringVar(value='frame')
         # Encoder quality fields. The Quality dropdown is a convenience —
@@ -852,6 +870,11 @@ class MainGUI(tk.Tk):
         # Apply current hide-color-fx state to freshly built blocks.
         if self.var_hide_color_fx.get():
             self._apply_hide_color_fx(active=True, take_snapshot=False)
+        # Same for passthrough — if the checkbox was already on (e.g. loaded
+        # from a saved preset), make sure the frame-inserting effect blocks
+        # are hidden right after they're built.
+        if self.vars.get('passthrough_mode') and self.vars['passthrough_mode'].get():
+            self._apply_passthrough_hide(active=True, take_snapshot=False)
 
     def _acc_group(self, parent, title, open=False):
         g = tk.Frame(parent, bg=C_SILVER, bd=1, relief='solid')
@@ -891,6 +914,83 @@ class MainGUI(tk.Tk):
         return body
 
     # ─── color-fx hide toggle ───
+    def _on_toggle_passthrough(self):
+        """Checkbox callback — hide/restore frame-inserting effect blocks."""
+        active = bool(self.vars['passthrough_mode'].get())
+        self._apply_passthrough_hide(active=active, take_snapshot=True)
+
+    def _apply_passthrough_hide(self, *, active: bool, take_snapshot: bool):
+        """Hide and force-off frame-inserting effects when passthrough is on.
+
+        Mirrors `_apply_hide_color_fx`: snapshot prior states on enable,
+        restore them on disable. Snapshot lives in `_passthrough_snapshot`
+        so a user toggling the box back off recovers their original effect
+        choices instead of waking up with everything off.
+        """
+        if active:
+            if take_snapshot:
+                snap = {}
+                # Some keys (e.g. fx_flash) live in BOTH PASSTHROUGH_HIDDEN_KEYS
+                # and COLOR_EFFECT_KEYS. If hide-color-fx is currently on,
+                # the live var is False (forced off by that mode) — but the
+                # USER's true choice is preserved in `_color_fx_snapshot`.
+                # We must snapshot from there, otherwise restoring later
+                # writes a stale False back into the user's preset.
+                color_snap = self._color_fx_snapshot or {}
+                for key in PASSTHROUGH_HIDDEN_KEYS:
+                    if key in self.vars:
+                        if key in color_snap:
+                            snap[key] = bool(color_snap[key])
+                        else:
+                            try:
+                                snap[key] = bool(self.vars[key].get())
+                            except Exception:
+                                snap[key] = False
+                self._passthrough_snapshot = snap
+            for key in PASSTHROUGH_HIDDEN_KEYS:
+                if key in self.vars:
+                    try:
+                        self.vars[key].set(False)
+                    except Exception:
+                        pass
+                blk = self._effect_block_frames.get(key) if hasattr(
+                    self, '_effect_block_frames') else None
+                if blk is not None and blk.winfo_ismapped():
+                    blk.pack_forget()
+        else:
+            snap = self._passthrough_snapshot or {}
+            color_active = self.var_hide_color_fx.get()
+            for key in PASSTHROUGH_HIDDEN_KEYS:
+                if key in self.vars and key in snap:
+                    if color_active and key in COLOR_EFFECT_KEYS:
+                        # color-fx hide is still in effect for this key — if
+                        # we wrote `snap[key]=True` to the live var, color-fx
+                        # would force it back to False on its next sync, and
+                        # the user's choice would be silently lost when they
+                        # later disable color-fx hide. Write to the
+                        # color-fx snapshot instead so the value survives
+                        # until that mode is exited.
+                        self._color_fx_snapshot[key] = snap[key]
+                    else:
+                        try:
+                            self.vars[key].set(snap[key])
+                        except Exception:
+                            pass
+                blk = self._effect_block_frames.get(key) if hasattr(
+                    self, '_effect_block_frames') else None
+                # Don't re-pack a block that color-fx hide is currently
+                # holding hidden — let that mode own visibility for shared
+                # keys until it's disabled.
+                shared_hidden = color_active and key in COLOR_EFFECT_KEYS
+                if (blk is not None and not blk.winfo_ismapped()
+                        and not shared_hidden):
+                    blk.pack(fill='x')
+            self._passthrough_snapshot = {}
+
+        refresh = getattr(self, '_effects_refresh_scroll', None)
+        if refresh is not None:
+            self.after_idle(refresh)
+
     def _on_toggle_hide_color_fx(self):
         """Checkbox callback. Snapshots states + applies, or restores."""
         active = self.var_hide_color_fx.get()
@@ -1086,6 +1186,26 @@ class MainGUI(tk.Tk):
         bpm_entry.bind('<FocusOut>', _commit_manual_bpm)
         bpm_entry.bind('<Return>', _commit_manual_bpm)
 
+        # Passthrough mode — read frames sequentially from one source video,
+        # analyse its OWN audio track, no cut/sample/random sampling. Frame-
+        # inserting effects (Stutter, Flash, Datamosh prebake) get hidden
+        # from the EFFECTS panel while this is on, since they'd shift the
+        # input→output frame mapping and desync the audio.
+        self._row_with_help(body, 'Passthrough Mode', bi(
+            "Process the source video 1:1 — no cuts, no resampling, native frame order. "
+            "Audio is taken from the video's own track and used both for analysis (effect "
+            "triggers) and for the output. No external audio file is needed. While ON, "
+            "Stutter / Flash / Datamosh are hidden because they would break audio sync.",
+            "Прогон исходного видео 1:1 — без нарезки, без рандомного семплинга, в "
+            "нативном порядке кадров. Аудио берётся из самого видео и используется и для "
+            "анализа (триггеры эффектов), и в выводе. Внешний аудиофайл не нужен. Пока "
+            "включено, Stutter / Flash / Datamosh скрываются — иначе сломалась бы "
+            "синхронизация аудио."))
+        ttk.Checkbutton(body, text='Passthrough mode (use source video as-is)',
+                        variable=self.vars['passthrough_mode'],
+                        command=self._on_toggle_passthrough,
+                        style='W95.TCheckbutton').pack(anchor='w', padx=24, pady=(0, 4))
+
         # Silence
         self._row_with_help(body, 'Silence Treatment', bi(
             'How long (>1s) silent stretches are rendered: dim, soft blur, both, or untouched. '
@@ -1236,6 +1356,20 @@ class MainGUI(tk.Tk):
         self.fps_combo.set('24'); self.fps_combo.pack(side='left', padx=4)
         self.fps_combo.bind('<<ComboboxSelected>>',
                             lambda e: self.vars['fps'].set(float(self.fps_combo.get())))
+        # Match-source button: probe the loaded source video's native FPS
+        # via OpenCV and write it into the combobox + cfg var. Useful in
+        # passthrough (so output is bit-exact in time) and outside it (so
+        # the cut pipeline samples at the source's native rate). Read-only
+        # against an empty selection — logs an error instead of crashing.
+        match_btn = ttk.Button(fr, text='Match source FPS',
+                               command=self._fps_match_source,
+                               style='W95.TButton')
+        match_btn.pack(side='left', padx=4)
+        Tooltip(match_btn, bi(
+            "Read the native FPS of the currently loaded source video and use it. "
+            "Requires Load Source Video to be set first.",
+            "Считать нативный FPS текущего загруженного видео и поставить его. "
+            "Сначала нужно загрузить источник через Load Source Video."))
 
         # Resolution mode (backlog #2)
         self._row_with_help(wr, 'Resolution Mode', bi(
@@ -2139,10 +2273,48 @@ class MainGUI(tk.Tk):
         self.console.insert(tk.END, f'[{time.strftime("%H:%M:%S")}] > {msg}\n')
         self.console.see(tk.END)
 
+    # ─── FPS match source ───
+    def _fps_match_source(self):
+        """Probe the loaded source video for its native FPS and apply it.
+
+        Falls back gracefully (no-op + log) if no video is loaded yet or the
+        capture refuses to open. Uses OpenCV directly so this is cheap and
+        does not touch the engine's render path.
+        """
+        if not self.video_paths:
+            self.log('Match FPS: no source video loaded yet.')
+            return
+        import cv2
+        cap = cv2.VideoCapture(self.video_paths[0])
+        try:
+            if not cap.isOpened():
+                self.log(f'Match FPS: could not open '
+                         f'{os.path.basename(self.video_paths[0])}.')
+                return
+            src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        finally:
+            cap.release()
+        if src_fps <= 0.0:
+            self.log('Match FPS: source reports zero/unknown FPS.')
+            return
+        # Round to int — the export pipeline expects an integer. Display the
+        # original in the log so the user knows what was rounded if anything.
+        rounded = int(round(src_fps))
+        self.vars['fps'].set(float(rounded))
+        if hasattr(self, 'fps_combo'):
+            self.fps_combo.set(str(rounded))
+        self.log(f'Match FPS: source {src_fps:.3f} → output {rounded} fps.')
+
     # ─── render ───
     def run(self, mode='final'):
-        if not self.audio_path or not self.video_paths:
-            self.log('ERROR: Select Audio and Video source!')
+        passthrough = bool(self.vars.get('passthrough_mode')
+                           and self.vars['passthrough_mode'].get())
+        if not self.video_paths:
+            self.log('ERROR: Select a source video!')
+            return
+        if not passthrough and not self.audio_path:
+            self.log('ERROR: Select an audio file '
+                     '(or enable Passthrough mode in Cut Logic).')
             return
         cfg = self.get_current_config()
         cfg['audio_path'] = self.audio_path

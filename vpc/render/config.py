@@ -170,6 +170,17 @@ class RenderConfig:
     def use_manual_bpm(self) -> bool:
         return bool(self.raw.get('use_manual_bpm', False))
 
+    # ----- passthrough mode -----
+    @property
+    def passthrough_mode(self) -> bool:
+        """Process the source video 1:1 — no cuts, no resampling, native order.
+
+        Audio is extracted from the source video itself and used both for
+        analysis (effect triggers) and as the muxed output track. No
+        external audio file is required.
+        """
+        return bool(self.raw.get('passthrough_mode', False))
+
     # ----- scene detection -----
     @property
     def use_scene_detect(self) -> bool:
@@ -214,7 +225,9 @@ class RenderConfig:
     def validate(self) -> List[str]:
         """Return a list of human-readable problems (empty list if OK)."""
         errors = []
-        if not self.audio_path:
+        # In passthrough mode the audio track is extracted from the source
+        # video itself, so no separate audio_path is required.
+        if not self.audio_path and not self.passthrough_mode:
             errors.append('audio_path missing')
         if not self.video_paths:
             errors.append('video_paths missing')

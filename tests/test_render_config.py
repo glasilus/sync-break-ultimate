@@ -65,3 +65,27 @@ def test_validate_passes_when_paths_provided():
         'output_path': '/z.mp4',
     })
     assert rc.validate() == []
+
+
+def test_passthrough_default_off():
+    assert RenderConfig({}).passthrough_mode is False
+
+
+def test_validate_passthrough_audio_optional():
+    """In passthrough mode the audio is extracted from the video, so
+    `audio_path` is no longer required for a config to validate."""
+    rc = RenderConfig({
+        'passthrough_mode': True,
+        'video_paths': ['/y.mp4'],
+        'output_path': '/z.mp4',
+    })
+    assert rc.validate() == []
+
+
+def test_validate_normal_mode_still_requires_audio():
+    rc = RenderConfig({
+        'video_paths': ['/y.mp4'],
+        'output_path': '/z.mp4',
+    })
+    errors = rc.validate()
+    assert any('audio_path' in e for e in errors)
