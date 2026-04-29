@@ -46,19 +46,47 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build DiscVPC01 (Python, --onedir)
-        # Build is driven by tools/build_pyinstaller.py — see that file
-        # for the rationale around discovering native .libs DLLs and
-        # injecting them via --add-binary (the only mechanism PyInstaller
-        # offers that reliably picks up dot-prefixed dirs like
-        # numpy/.libs/ and sklearn/.libs/).
-        shell: pwsh
+      - name: Build DiscVPC01.exe (Python, --onefile)
+        # We intentionally stay on --onefile here despite the slow
+        # cold-start. Switching to --onedir caused numpy 1.24's
+        # `numpy/.libs/libopenblas...dll` to drop out of the bundle on
+        # the GitHub runner specifically (worked locally). PyInstaller's
+        # numpy hook calls `collect_dynamic_libs("numpy")` which picks
+        # up that DLL on the local machine but not on CI — likely due
+        # to a version skew between hooks-contrib and the runner's
+        # numpy wheel layout that we couldn't reproduce locally to fix.
+        # --splash CDDRIVE.png covers the slow extraction so users see
+        # the app is loading instead of a frozen taskbar.
+        shell: cmd
         run: |
-          python tools/build_pyinstaller.py `
-            --mode onedir `
-            --icon CDDRIVE.ico `
-            --splash CDDRIVE.png `
-            --manifest tools/disc_vpc_utf8.manifest
+          pyinstaller ^
+            --onefile --noconsole --clean --noupx ^
+            --name DiscVPC01 ^
+            --icon CDDRIVE.ico ^
+            --splash CDDRIVE.png ^
+            --manifest tools/disc_vpc_utf8.manifest ^
+            --add-data "CDDRIVE.png;." ^
+            --collect-all numpy ^
+            --collect-all PIL ^
+            --collect-all cv2 ^
+            --collect-all librosa ^
+            --collect-all scipy ^
+            --collect-all soundfile ^
+            --collect-all sounddevice ^
+            --collect-all cffi ^
+            --collect-all audioread ^
+            --collect-all pooch ^
+            --collect-all lazy_loader ^
+            --collect-all joblib ^
+            --collect-all imageio_ffmpeg ^
+            --collect-all numba ^
+            --collect-all llvmlite ^
+            --collect-all scenedetect ^
+            --collect-all opensimplex ^
+            --hidden-import=scenedetect.detectors ^
+            --collect-submodules vpc ^
+            --paths . ^
+            vpc/__main__.py
 
       - name: Bootstrap vcpkg
         shell: powershell
@@ -100,16 +128,12 @@ jobs:
           copy /Y rt_cpp\build\Release\DiscVPC01-RT.exe dist\DiscVPC01-RT.exe || exit /b 1
 
       - name: Upload Windows artifact
-        # `dist/DiscVPC01/**` is the --onedir tree (DiscVPC01.exe at the
-        # root + a sibling `_internal/` with all DLLs). Uploading the
-        # whole subtree preserves that layout; the release zip step
-        # below packs it together with the standalone RT exe.
         uses: actions/upload-artifact@v4
         with:
           name: Disc-VPC-01-windows
           if-no-files-found: error
           path: |
-            dist/DiscVPC01/**
+            dist/DiscVPC01.exe
             dist/DiscVPC01-RT.exe
             README.MD
             README_RU.MD
@@ -144,16 +168,40 @@ jobs:
           pip install pyinstaller
 
       - name: Build DiscVPC01 (Python)
-        # No --splash on macOS-arm64 (PyInstaller's Tk splash isn't
-        # supported there). --icon CDDRIVE.icns sets the .app bundle
-        # icon via Contents/Resources + Info.plist CFBundleIconFile.
-        # Native DLL discovery in build_pyinstaller.py is a no-op on
-        # macOS (no .libs convention) but the same script path keeps
-        # all three platforms aligned.
+        # No --add-binary for ffmpeg: imageio-ffmpeg ships a fully
+        # self-contained static ffmpeg in its wheel (called via
+        # imageio_ffmpeg.get_ffmpeg_exe()) — the old approach of
+        # copying brew's ffmpeg dragged in a tree of homebrew dylibs
+        # that broke on every clean Mac.
+        # No --splash on macOS-arm64 (PyInstaller's Tk-based splash
+        # window can't initialise on Apple Silicon runners).
         run: |
-          python tools/build_pyinstaller.py \
-            --mode onefile \
-            --icon CDDRIVE.icns
+          pyinstaller \
+            --onefile --windowed --clean --noupx \
+            --name DiscVPC01 \
+            --icon CDDRIVE.icns \
+            --add-data "CDDRIVE.png:." \
+            --collect-all numpy \
+            --collect-all PIL \
+            --collect-all cv2 \
+            --collect-all librosa \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all sounddevice \
+            --collect-all cffi \
+            --collect-all audioread \
+            --collect-all pooch \
+            --collect-all lazy_loader \
+            --collect-all joblib \
+            --collect-all imageio_ffmpeg \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --collect-all scenedetect \
+            --collect-all opensimplex \
+            --hidden-import=scenedetect.detectors \
+            --collect-submodules vpc \
+            --paths . \
+            vpc/__main__.py
 
       - name: Bundle transitive dylibs (dylibbundler)
         # PyInstaller --windowed creates the .app shell but doesn't
@@ -331,9 +379,32 @@ jobs:
         # the window icon is set at runtime via Tk iconphoto from the
         # bundled CDDRIVE.png (resolved through sys._MEIPASS).
         run: |
-          xvfb-run --auto-servernum python tools/build_pyinstaller.py \
-            --mode onefile \
-            --splash CDDRIVE.png
+          xvfb-run --auto-servernum pyinstaller \
+            --onefile --noconsole --clean --noupx \
+            --name DiscVPC01 \
+            --splash CDDRIVE.png \
+            --add-data "CDDRIVE.png:." \
+            --collect-all numpy \
+            --collect-all PIL \
+            --collect-all cv2 \
+            --collect-all librosa \
+            --collect-all scipy \
+            --collect-all soundfile \
+            --collect-all sounddevice \
+            --collect-all cffi \
+            --collect-all audioread \
+            --collect-all pooch \
+            --collect-all lazy_loader \
+            --collect-all joblib \
+            --collect-all imageio_ffmpeg \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --collect-all scenedetect \
+            --collect-all opensimplex \
+            --hidden-import=scenedetect.detectors \
+            --collect-submodules vpc \
+            --paths . \
+            vpc/__main__.py
 
       - name: Bootstrap vcpkg
         run: |
