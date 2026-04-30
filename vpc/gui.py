@@ -521,8 +521,12 @@ class MainGUI(tk.Tk):
         ar = tk.Frame(fp, bg=C_SILVER); ar.pack(fill='x', padx=6, pady=(4, 0))
         self._audio_dot = tk.Label(ar, text='●', fg='#AAAAAA', bg=C_SILVER, font=('MS Sans Serif', 12))
         self._audio_dot.pack(side='left', padx=(0, 4))
-        ttk.Button(ar, text='Load Audio (WAV / MP3)',
-                   command=self.sel_audio, style='W95.TButton').pack(side='left', fill='x', expand=True)
+        # Cached so passthrough mode can disable it: the audio file isn't
+        # used when the engine extracts the source video's own track.
+        self._audio_btn = ttk.Button(
+            ar, text='Load Audio (WAV / MP3)',
+            command=self.sel_audio, style='W95.TButton')
+        self._audio_btn.pack(side='left', fill='x', expand=True)
         self.lbl_audio_name = tk.Label(fp, text='— not loaded —',
                                        bg=C_SILVER, fg=C_DARK_GRAY,
                                        font=('Courier New', 9), anchor='w',
@@ -957,6 +961,16 @@ class MainGUI(tk.Tk):
                     self, '_effect_block_frames') else None
                 if blk is not None and blk.winfo_ismapped():
                     blk.pack_forget()
+            # Cut Logic widgets that have no meaning in passthrough.
+            for w in getattr(self, '_passthrough_cut_widgets', []):
+                if w.winfo_ismapped():
+                    w.pack_forget()
+            # Disable the audio file picker — passthrough uses the source
+            # video's own audio track. The user can still see the previous
+            # selection (label retains state), they just can't change it.
+            btn = getattr(self, '_audio_btn', None)
+            if btn is not None:
+                btn.state(['disabled'])
         else:
             snap = self._passthrough_snapshot or {}
             color_active = self.var_hide_color_fx.get()
@@ -985,6 +999,15 @@ class MainGUI(tk.Tk):
                 if (blk is not None and not blk.winfo_ismapped()
                         and not shared_hidden):
                     blk.pack(fill='x')
+            # Re-pack cut-only widgets in original build order. They were
+            # appended in that order, so iterating forward preserves layout.
+            for w in getattr(self, '_passthrough_cut_widgets', []):
+                if not w.winfo_ismapped():
+                    w.pack(fill='x')
+            # Re-enable the audio picker.
+            btn = getattr(self, '_audio_btn', None)
+            if btn is not None:
+                btn.state(['!disabled'])
             self._passthrough_snapshot = {}
 
         refresh = getattr(self, '_effects_refresh_scroll', None)
@@ -1105,16 +1128,28 @@ class MainGUI(tk.Tk):
                     btn.pack(side='left', padx=4)
 
     def _build_cut_logic(self, body):
-        self._row_with_help(body, 'Smart Scene Detection', bi(
+        # Widgets that lose their meaning in passthrough mode (no random
+        # sampling → no scene buffer, no cuts → no min-cut filter) are
+        # collected here so `_apply_passthrough_hide` can pack_forget /
+        # pack them as a group, mirroring how color-fx hide handles its
+        # set of effect blocks.
+        self._passthrough_cut_widgets: list = []
+
+        scene_hdr = self._row_with_help(body, 'Smart Scene Detection', bi(
             'Detects scene changes in the source video and prefers to start segments at those '
             'cuts. Off = uniform random sampling.',
             'Находит смены сцен в исходном видео и предпочитает стартовать сегменты с этих '
             'точек. Выкл — равномерная случайная выборка.'))
-        ttk.Checkbutton(body, text='Detect scene cuts',
+        scene_cb_wrap = tk.Frame(body, bg=self._parent_bg(body))
+        scene_cb_wrap.pack(fill='x')
+        ttk.Checkbutton(scene_cb_wrap, text='Detect scene cuts',
                         variable=self.vars['use_scene_detect'],
                         style='W95.TCheckbutton').pack(anchor='w', padx=24, pady=(0, 4))
+        self._passthrough_cut_widgets.extend([scene_hdr, scene_cb_wrap])
 
-        sliders = [
+        # Always-shown sliders. Ones that only matter outside passthrough
+        # are built separately below so they can be hidden as a group.
+        sliders_always = [
             ('Global Chaos Level', 'chaos_level', 0.0, 1.0, bi(
                 'Master dial. Scales every effect chance by 0.3 + 0.7·CHAOS plus stutter/flash '
                 'probability. 0 = polite, 1 = unhinged.',
@@ -1129,6 +1164,13 @@ class MainGUI(tk.Tk):
                 'How sharp an attack must be to count as IMPACT. Lower = more frequent flashes.',
                 'Насколько резкой должна быть атака, чтобы попасть в IMPACT. Ниже — чаще '
                 'срабатывают вспышки.')),
+        ]
+        for lbl, key, lo, hi, tt in sliders_always:
+            self._row_with_help(body, lbl, tt)
+            self._slider(body, key, lo, hi)
+
+        # Cut-only sliders: irrelevant in passthrough.
+        sliders_cut_only = [
             ('Min Cut Duration (sec)', 'min_cut_duration', 0.0, 0.3, bi(
                 'Drops segments shorter than this. Higher = calmer pacing.',
                 'Отбрасывает сегменты короче этого значения. Больше — спокойнее темп.')),
@@ -1136,9 +1178,10 @@ class MainGUI(tk.Tk):
                 'How many detected scene cuts to keep around as candidates.',
                 'Сколько найденных точек смены сцен держать в пуле кандидатов.')),
         ]
-        for lbl, key, lo, hi, tt in sliders:
-            self._row_with_help(body, lbl, tt)
-            self._slider(body, key, lo, hi)
+        for lbl, key, lo, hi, tt in sliders_cut_only:
+            row = self._row_with_help(body, lbl, tt)
+            sf = self._slider(body, key, lo, hi)
+            self._passthrough_cut_widgets.extend([row, sf])
 
         self._row_with_help(body, 'Snap Cuts to Beat Grid', bi(
             'After onset detection, pull each onset to the nearest beat within tolerance. '

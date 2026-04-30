@@ -37,6 +37,7 @@
     - [3.14 Mystery Panel](#314-mystery-panel)
     - [3.15 Multiple Video Sources](#315-multiple-video-sources)
     - [3.16 Silence Treatment](#316-silence-treatment)
+    - [3.17 Passthrough Mode](#317-passthrough-mode)
   - [4. Disc VPC 01 R-T — Real-Time (C++)](#4-disc-vpc-01-r-t--real-time-c)
     - [4.1 Architecture](#41-architecture)
     - [4.2 Build from source](#42-build-from-source)
@@ -177,6 +178,8 @@ executable on every launch — see §4.13.
 
 **At a glance:** load a song, load a video (or several), pick a preset, click DRAFT to see a quick low-res preview, tweak, then click RENDER FULL VIDEO. That's the whole loop.
 
+> **First-launch wait.** `DiscVPC01.exe` is a self-extracting bundle: the first window can take **2–3 minutes** to appear after you double-click. Nothing is broken — Python, the bundled ffmpeg, and the analysis libraries are unpacking in the background. Subsequent launches in the same session are faster but never instant. Be patient on the first start.
+
 ### 3.1 Interface Layout
 
 The window is divided into three vertical panels:
@@ -274,6 +277,14 @@ The number of unique scene timestamps held in memory for random selection during
 When enabled, each detected onset is snapped to the nearest beat-grid position if it falls within the **Beat Snap Tolerance** window. This aligns cuts more tightly to the rhythmic pulse of the track.
 
 **Beat Snap Tolerance** *(0.01 – 0.15 sec)* — the maximum distance an onset can be moved to snap to a beat. If the onset is farther than this from the nearest beat, it is left in place. When snap is on, the detected global BPM appears in the status log next to the segment count (`Audio: 198.4s | Segments: 412 | 142.0 BPM`).
+
+---
+
+**Manual BPM** *(checkbox + numeric field, 20 – 400)*
+
+When the auto-detected BPM is wrong (typical with sparse drums, half-time genres, or tracks where librosa locks onto a sub-harmonic), tick **Use Manual BPM** and type the value you actually want. The engine then bypasses beat tracking and lays a uniform grid at the chosen tempo — onset detection still runs, but snap-to-beat now uses your grid instead of the detected one.
+
+Use this when you know the track tempo from a DAW, label release, or any tap-tempo tool. Leave the checkbox off to keep the auto-detected value.
 
 ---
 
@@ -470,9 +481,14 @@ Degradation effects simulate worn or low-quality recording/playback media.
 | **Interlace** | SUSTAIN | Splits even and odd scan lines and offsets them by a few pixels, simulating interlaced video. |
 | **Bad Signal** | DROP, NOISE | Overlays digital signal breakup artefacts — horizontal stripes, colour shifts, and noise bands. |
 | **Dithering** | SILENCE, SUSTAIN | Applies an ordered dither pattern, reducing the effective colour palette while adding a structured noise texture. |
-| **Zoom Glitch** | IMPACT | Applies a rapid random zoom and crop for a single frame, creating a sudden jump-cut-within-a-frame pulse. |
+| **Zoom Glitch** | IMPACT | Anisotropic stretch — picks one axis (X *or* Y) at random, slams it to a peak scale on the trigger frame, then eases back to normal over several frames with a cubic curve. Not a single-frame pulse anymore: it's a directional snap with a curved return. |
+| **Sharpen** | Any | Unsharp mask. Boosts edge contrast aggressively. Pair with grainy / soft material when you want it to feel cut from glass instead of velvet. |
 
 Each effect has a **Chance** slider.
+
+**Zoom Glitch** has one extra parameter — **Snap-back Duration (frames)** *(2 – 24)* — controlling how many frames the eased return-to-normal takes. Short values feel like a punch; long values feel like a breath.
+
+**Sharpen** has two extras: **Amount** *(0 – 3)* — strength of the unsharp mask kernel — and **Radius** *(1 – 9)* — Gaussian blur radius for the low-pass that gets subtracted. Higher radius = halos appear around larger features.
 
 ---
 
@@ -750,6 +766,8 @@ Located in the **EXPORT** tab.
 
 **Frame Rate (FPS)** — `12 / 24 / 30 / 60`, default `24`. Does not affect source audio timing; only controls how many video frames are generated per second of output.
 
+Next to the FPS dropdown is a **Match Source FPS** button. Click it and the program probes the first loaded source video and snaps the FPS field to that file's native frame rate (rounded to the nearest integer). Useful for both regular and Passthrough renders — in Passthrough mode (§3.17) it's how you make sure the output runs at exactly the source's pace, with no resampling.
+
 **Resolution Mode** — three policies for the output dimensions:
 
 | Mode | Behavior |
@@ -881,11 +899,11 @@ The sliders are not independent. What you give to one changes what another is ca
 
 **COLLAPSE** initiates. It works in two directions simultaneously, though the second is not visible until the first is already underway. ZERO changes what it arrives at.
 
-**ZERO** is not zero. It is a seed. The same values, a different ZERO — a different outcome. It also holds a record the original does not know it carries. FLESH\_K amplifies what ZERO reveals.
+**ZERO** is not zero. It is a key. What was earlier is still nearby — not behind, not under, simply still — and ZERO chooses where it is allowed to surface. The choosing is patterned, never even, and the pattern is older than the moment it acts on. FLESH\_K teaches the pattern where to attend.
 
 **FLESH\_K** is what it says. It converts. The conversion is not clean. What exits is not in the same space as what entered. At low values nothing appears to happen. The threshold is not fixed.
 
-**DOT** is small. It separates what arrived together. Three things depart from the same moment but do not arrive at the same time. It lengthens when VESSEL is present.
+**DOT** is small. It separates what arrived together. What was one departs in pieces, and the pieces no longer agree on when. Past a certain point a second disagreement begins, set against the first. It lengthens when VESSEL is present.
 
 Move them. Render. Observe what changed. Then move them again.
 
@@ -919,6 +937,35 @@ Located in the **Cut Logic** section, under *Silence Treatment*. Default: **None
 | **Dim** | Multiplies all pixel values by 0.6, reducing brightness. Good for maintaining visual contrast between active and quiet moments. (Hidden when *Hide color-altering effects* is on.) |
 | **Blur** | Applies a Gaussian blur (15×15 kernel). The image stays full brightness but loses sharpness, creating a dreamlike soft-focus look during quiet passages. |
 | **Both** | A lighter blur (11×11) combined with a 0.7 brightness multiplier. The strongest treatment — defocused and darkened simultaneously. |
+
+---
+
+### 3.17 Passthrough Mode
+
+**Passthrough Mode** is a separate way of running the renderer for cases where you do **not** want any cuts at all — the source video plays from start to end in its original order, and the audio that drives the effects is the **video's own soundtrack**, not a separately loaded track.
+
+Use it when you want every effect in this program (warps, glitches, mystery, formula, overlays) to react to a video clip's own audio without re-cutting the footage. Music videos, performance captures, full DJ-set recordings, anything where the picture and sound already belong together.
+
+**Where:** the **Cut Logic** section, top of the EFFECTS tab — checkbox **Passthrough Mode**.
+
+**What it changes when ticked:**
+
+- The video plays sequentially from frame 0 to its last frame at its native frame rate. No random seeks, no scene-detection jumping, no cuts.
+- The audio is **extracted from the video** itself — internally via ffmpeg into a temporary WAV — and used both for analysis (segment classification, beat tracking, intensity) and as the muxed output track. **No external audio file is required**, and the **Load Audio** button is disabled while Passthrough is on.
+- The output FPS is auto-locked to the source video's native FPS, so the picture and sound stay in sync.
+- Frame-inserting effects that don't make sense in this mode are **hidden** from the EFFECTS tab: `Stutter`, `Flash Frame`, `Datamosh`. Their state is restored when you turn Passthrough off.
+- Cut-logic widgets that don't apply (`Min Cut Duration`, `Scene Buffer Size`, `Smart Scene Detection`) are also hidden. Snap to beat, manual BPM, chaos and beat threshold all still work — they shape effect intensity, just not cut points.
+
+**What it does *not* change:** every other effect — warps, signal domain, degradation, sharpen, ASCII, formula, mystery, overlays, chroma key, silence treatment — runs exactly as it does in normal mode. The intensity model, segment types, snap-to-beat, and chaos all behave identically.
+
+**Workflow:**
+
+1. Tick **Passthrough Mode**.
+2. Load one or more source videos (multi-source still works — the engine concatenates them as a single stream and uses the first one's audio).
+3. Use **Match Source FPS** (§3.11) to pick a sane preview/draft FPS (the final render will lock to the source's native FPS regardless).
+4. Pick effects, click DRAFT or PREVIEW to dial them in, then RENDER FULL VIDEO.
+
+The output file is a 1:1 re-encode of the source's runtime with effects applied per-frame and the original audio re-muxed.
 
 ---
 
