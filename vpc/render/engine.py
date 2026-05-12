@@ -67,6 +67,11 @@ class _RenderCtx:
     flash_chance: float
     datamosh_cap: object = None
     datamosh_total_frames: int = 0
+    # Passthrough-mode datamosh: bitstream-prebaked source that REPLACES
+    # the live cap inside `_run_passthrough_loop` (length-preserving
+    # long-GOP encode, so 1:1 frame alignment with audio is unchanged).
+    # None = no datamosh prebake / not in passthrough mode.
+    passthrough_dm_cap: object = None
     frames_emitted: int = 0
 
 
@@ -199,9 +204,11 @@ class BreakcoreEngine:
         return extract_audio_track(video_path, self.log)
 
     # ----- datamosh helper -----
-    def _prepare_datamosh_source(self, video_path: str, output_path: str) -> bool:
+    def _prepare_datamosh_source(self, video_path: str, output_path: str,
+                                 *, mode: str = 'strip') -> bool:
         """Thin wrapper over `engine_setup.prepare_datamosh_source`."""
-        return prepare_datamosh_source(video_path, output_path, self.log)
+        return prepare_datamosh_source(video_path, output_path, self.log,
+                                       mode=mode)
 
     # ----- progress / ETA -----
     @staticmethod
@@ -505,29 +512,68 @@ class BreakcoreEngine:
                 sink = _open_sink(fb)
 
         # ----- datamosh pre-bake -----
-        # Passthrough mode skips datamosh prebake — the prebaked I-frame-
-        # dropped source replaces the live frames on NOISE segments, which
-        # would break the strict 1:1 input→output mapping passthrough
-        # promises. The DerivWarp/SelfDisplace effects still provide a
-        # CPU-side datamosh-style smear when enabled.
+        # Both modes use the SAME 'strip' bitstream prebake (long-GOP,
+        # P-only, single-reference, then drop every source I-frame). The
+        # bitstream effect is the real-deal datamosh smear: forcing the
+        # decoder to keep applying motion vectors against stale content
+        # because the keyframes that would refresh it are gone.
+        #
+        # Strip drops frames, so the prebaked file is SHORTER than the
+        # source. The two modes diverge only in how the engine consumes
+        # the resulting cap:
+        #   • Cut mode → swap-on-NOISE: live cap is replaced by the
+        #     prebaked one only on NOISE segments. Random sampling means
+        #     the shorter length is irrelevant — the engine just seeks
+        #     into whichever pool member it's reading.
+        #   • Passthrough mode → stretch-replay: the prebaked cap REPLACES
+        #     the live cap, and the loop maps each output frame fi to a
+        #     prebake index `int(fi * n_prebake / target_total_frames)`.
+        #     Each kept P-frame is shown ~target/n_prebake times, so where
+        #     the source had an I-frame the surviving P-chain plays out
+        #     across multiple output frames as a freeze-and-smear.
+        #     `target_total_frames = audio_duration × fps` is unchanged,
+        #     so audio still aligns 1:1 with output frames.
+        # The Python-side DatamoshEffect (optical-flow smear) runs in
+        # both modes via the regular effect chain — independent of and
+        # complementary to the bitstream prebake.
         datamosh_source_path = None
         datamosh_cap = None
         datamosh_total_frames = pool.vid_total_frames
-        if is_final and rc.datamosh_enabled and not rc.passthrough_mode:
+        passthrough_dm_cap = None
+        passthrough_dm_path = None
+        if is_final and rc.datamosh_enabled:
             dm_path = output_path + '_dmosh_src.mp4'
-            # Stale leftover from a previously aborted render — its missing
-            # moov atom is what produces the "moov atom not found" warning
-            # next time around. Drop it before regenerating.
             if os.path.exists(dm_path):
                 try: os.remove(dm_path)
                 except OSError: pass
-            self.log('Preparing datamosh source (I-frame drop)...')
-            if self._prepare_datamosh_source(video_paths[0], dm_path):
-                datamosh_source_path = dm_path
-                datamosh_cap = cv2.VideoCapture(dm_path)
-                datamosh_total_frames = int(
-                    datamosh_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                self.log('Datamosh source ready.')
+            self.log('Preparing datamosh source (strip)...')
+            if self._prepare_datamosh_source(video_paths[0], dm_path, mode='strip'):
+                if rc.passthrough_mode:
+                    cap_try = cv2.VideoCapture(dm_path)
+                    if cap_try.isOpened():
+                        passthrough_dm_path = dm_path
+                        passthrough_dm_cap = cap_try
+                        self.log('Datamosh passthrough source ready.')
+                    else:
+                        cap_try.release()
+                        try: os.remove(dm_path)
+                        except OSError: pass
+                        self.log('Datamosh passthrough cap could not open prebaked '
+                                 'file — falling back to live source + optical flow.')
+                else:
+                    cap_try = cv2.VideoCapture(dm_path)
+                    if cap_try.isOpened():
+                        datamosh_source_path = dm_path
+                        datamosh_cap = cap_try
+                        datamosh_total_frames = int(
+                            datamosh_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or pool.vid_total_frames
+                        self.log('Datamosh source ready.')
+                    else:
+                        cap_try.release()
+                        try: os.remove(dm_path)
+                        except OSError: pass
+                        self.log('Datamosh cap could not open prebaked file — '
+                                 'falling back to optical flow.')
             else:
                 self.log('Datamosh pre-processing failed, falling back to optical flow.')
 
@@ -555,6 +601,7 @@ class BreakcoreEngine:
             chaos=chaos, flash_chance=flash_chance,
             datamosh_cap=datamosh_cap,
             datamosh_total_frames=datamosh_total_frames,
+            passthrough_dm_cap=passthrough_dm_cap,
         )
 
         try:
@@ -574,6 +621,11 @@ class BreakcoreEngine:
                 datamosh_cap.release()
             if datamosh_source_path and os.path.exists(datamosh_source_path):
                 try: os.remove(datamosh_source_path)
+                except OSError: pass
+            if passthrough_dm_cap:
+                passthrough_dm_cap.release()
+            if passthrough_dm_path and os.path.exists(passthrough_dm_path):
+                try: os.remove(passthrough_dm_path)
                 except OSError: pass
             sink.close()
             # Temp WAV cleanup is handled by the outer guard in run().
@@ -728,7 +780,31 @@ class BreakcoreEngine:
         """
         rc = self.config
         sink = ctx.sink; pool = ctx.pool
-        cap, src_fps, src_total, _src_dur = pool.primary_cap()
+        # Passthrough datamosh substitution. The prebaked cap is shorter
+        # than the source (I-frames stripped), so we don't read it 1:1;
+        # instead `dm_stretch` enables per-frame stretch-replay below.
+        if ctx.passthrough_dm_cap is not None:
+            cap = ctx.passthrough_dm_cap
+            dm_stretch = True
+            dm_n_prebake = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+            # `dm_step` is how much we advance through the prebake per
+            # output frame (a fractional float kept in `dm_cursor`).
+            # E.g. if 12 % of source frames were I-frames, the prebake
+            # has ~88 % as many frames, dm_step ≈ 0.88, and on average
+            # the same prebake frame is shown ~1.14× before the cursor
+            # rolls into the next one — visible as freeze-and-smear.
+            dm_step = dm_n_prebake / max(1, ctx.target_total_frames)
+            dm_cursor = 0.0
+            dm_loaded_idx = -1
+            dm_held_bgr = None
+        else:
+            cap, src_fps, src_total, _src_dur = pool.primary_cap()
+            dm_stretch = False
+            dm_n_prebake = 0
+            dm_step = 0.0
+            dm_cursor = 0.0
+            dm_loaded_idx = -1
+            dm_held_bgr = None
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         # Synthetic SILENCE used both as a leading "before any segment" filler
@@ -782,13 +858,19 @@ class BreakcoreEngine:
             else:
                 seg = idle_seg
 
-            # In replace-mode we still need source pointer to advance, but
-            # we discard the decoded image (cap.grab() is the cheap form
-            # that decodes only enough to advance — no retrieve()).
+            # In replace-mode we override the OUTPUT frame for this
+            # iteration but still keep our source position moving — in
+            # 1:1 mode that's `cap.grab()` (cheap advance, no decode);
+            # in dm_stretch mode it's `dm_cursor += dm_step` (the same
+            # logical advance, but tracked in floating-point prebake
+            # space rather than integer source space).
             in_replace = (stutter_remaining > 0 or flash_remaining > 0)
             if in_replace:
-                if not cap.grab():
-                    break
+                if dm_stretch:
+                    dm_cursor += dm_step
+                else:
+                    if not cap.grab():
+                        break
                 if flash_remaining > 0:
                     fb = flash_frame_bytes or last_frame_bytes
                     flash_remaining -= 1
@@ -807,18 +889,43 @@ class BreakcoreEngine:
                     self._emit_progress(ctx.frames_emitted, ctx.target_total_frames)
                     continue
 
-            ret, frame_bgr = cap.read()
-            if not ret:
-                if fi == 0:
-                    # First read failed — sink would hang on a zero-frame
-                    # video stream + non-zero audio. Bail loudly.
-                    self.log('ERROR: passthrough failed on first frame — '
-                             'source video unreadable.')
-                    self.abort = True
-                # Source ran out earlier than target_total_frames — pad
-                # with the last good frame (if any) so audio doesn't get
-                # truncated by ffmpeg.
-                break
+            if dm_stretch:
+                # Stretch-replay: advance the prebake cap until its
+                # currently-loaded frame index covers `dm_cursor`. Each
+                # iteration steps `dm_cursor` by `dm_step`; the ceiling
+                # of `dm_cursor` tells us which prebake frame index we
+                # need loaded right now.
+                desired_idx = int(dm_cursor)
+                while dm_loaded_idx < desired_idx:
+                    ret_dm, dm_bgr = cap.read()
+                    if not ret_dm:
+                        # Prebake exhausted — fall back to the last
+                        # successfully held frame for the rest of the
+                        # render so audio still gets paired with video.
+                        break
+                    dm_held_bgr = dm_bgr
+                    dm_loaded_idx += 1
+                dm_cursor += dm_step
+                if dm_held_bgr is None:
+                    if fi == 0:
+                        self.log('ERROR: passthrough failed on first frame — '
+                                 'datamosh prebake unreadable.')
+                        self.abort = True
+                    break
+                frame_bgr = dm_held_bgr
+            else:
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    if fi == 0:
+                        # First read failed — sink would hang on a
+                        # zero-frame video stream + non-zero audio. Bail.
+                        self.log('ERROR: passthrough failed on first frame — '
+                                 'source video unreadable.')
+                        self.abort = True
+                    # Source ran out earlier than target_total_frames —
+                    # pad with the last good frame (if any) so audio
+                    # doesn't get truncated by ffmpeg.
+                    break
 
             frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             if frame.shape[0] != ctx.out_h or frame.shape[1] != ctx.out_w:

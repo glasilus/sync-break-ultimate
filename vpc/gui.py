@@ -791,7 +791,18 @@ class MainGUI(tk.Tk):
     _SKIP_RECOLOR_TEXTS = ('[?]', '[ ? ]')
 
     def _set_widget_enabled(self, w, enabled: bool):
-        """Recursively grey/ungrey a Tk subtree (skips help-icon labels)."""
+        """Recursively grey/ungrey a Tk subtree (skips help-icon labels).
+
+        Uses a per-widget cache (`_sb_enabled` attribute) so a no-op call
+        skips the underlying configure/state/cget round-trip — important
+        because preset apply fires every effect's traces in a tight burst,
+        which used to walk every label/slider tree on every write.
+        """
+        prev = getattr(w, '_sb_enabled', None)
+        if prev is enabled:
+            # Children already in the desired state too: subtree-wide cache
+            # invariant means no recursion needed.
+            return
         cls = w.winfo_class()
         try:
             if cls in ('TButton', 'TCheckbutton', 'TEntry', 'TCombobox',
@@ -805,6 +816,7 @@ class MainGUI(tk.Tk):
                     w.configure(fg=(C_TEXT if enabled else C_DARK_GRAY))
         except tk.TclError:
             pass
+        w._sb_enabled = enabled
         for child in w.winfo_children():
             self._set_widget_enabled(child, enabled)
 
@@ -2321,27 +2333,33 @@ class MainGUI(tk.Tk):
         return cfg
 
     def apply_preset(self, name):
+        # Skip writes whose value already matches — every var.set fires
+        # every registered trace (effect inner-pack toggles, dep-cascade
+        # greying, scroll refreshes), so redundant writes used to walk
+        # every effect block twice for no visible change.
+        def _set_if_changed(var, new_val):
+            try:
+                if var.get() != new_val:
+                    var.set(new_val)
+            except Exception:
+                try: var.set(new_val)
+                except Exception: pass
+
         # Reset to defaults first
         for k, v in self._defaults_all.items():
             if k in self.vars:
-                try:
-                    self.vars[k].set(v)
-                except Exception:
-                    pass
+                _set_if_changed(self.vars[k], v)
         # Empty preset = everything off + silence none.
         if name == EMPTY_PRESET_NAME:
             for spec in EFFECTS:
                 if spec.enable_key in self.vars:
-                    try:
-                        self.vars[spec.enable_key].set(False)
-                    except Exception:
-                        pass
-        self.var_silence_mode.set('none')
-        self.var_resolution_mode.set('preset')
+                    _set_if_changed(self.vars[spec.enable_key], False)
+        _set_if_changed(self.var_silence_mode, 'none')
+        _set_if_changed(self.var_resolution_mode, 'preset')
         # Apply overrides
         for key, val in PRESETS.get(name, {}).items():
             if key in self.vars:
-                self.vars[key].set(val)
+                _set_if_changed(self.vars[key], val)
         self._sync_formula_editor_from_var()
         self.log(f"Preset '{name}' loaded.")
 

@@ -71,11 +71,11 @@ def extract_audio_track(video_path: str, log: LogFn) -> Optional[str]:
 
 
 def prepare_datamosh_source(video_path: str, output_path: str,
-                            log: LogFn) -> bool:
-    """Re-encode `video_path` for "true" datamosh: long-GOP, P-frames only,
-    single-reference chains, then strip the source's existing I-frames.
+                            log: LogFn, *,
+                            mode: str = 'strip') -> bool:
+    """Re-encode `video_path` for "true" datamosh in two flavours.
 
-    The encoder flags matter for the look:
+    Common flags (both modes):
       • ``-bf 0`` — kill B-frames. B-frames decode in non-display order
         and reference both directions; they'd reset the smear chain and
         ruin the effect.
@@ -92,14 +92,31 @@ def prepare_datamosh_source(video_path: str, output_path: str,
         With ultrafast the encoder gives up on hard-to-track regions
         and emits intra blocks INSIDE P-frames, which look like static
         bricks instead of smear.
-    Then ``select=not(eq(pict_type,I))`` drops the source's own I-frames
-    from the resulting stream so the decoder is forced to reuse the
-    previous P-frame's content — that's where the motion smear comes from.
+
+    Modes:
+      • ``mode='strip'`` (cut-mode default) — additionally drops every
+        source I-frame via ``select=not(eq(pict_type,I))``. Frame count
+        SHRINKS, so this is only safe in cut mode where audio sync
+        comes from random sampling, not from 1:1 frame alignment.
+      • ``mode='longgop'`` (passthrough mode) — keeps every source
+        frame; only the encode side enforces long-GOP P-only output.
+        Frame count is preserved 1:1, so audio sync survives, but the
+        decoder still produces the characteristic motion-vector smear
+        on scene cuts (since the encoder isn't allowed to insert new
+        I-frames where the source content jumps).
     """
-    cmd = [
-        ffmpeg_bin(), '-y', '-i', video_path,
-        '-vf', 'select=not(eq(pict_type\\,I))',
-        '-vsync', 'vfr',
+    cmd = [ffmpeg_bin(), '-y', '-i', video_path]
+    if mode == 'strip':
+        cmd += ['-vf', 'select=not(eq(pict_type\\,I))', '-vsync', 'vfr']
+    elif mode == 'longgop':
+        # No filter: keep frame count 1:1 with source so the passthrough
+        # loop can still align frames to audio. The encoder flags below
+        # are what produce the datamosh look.
+        pass
+    else:
+        log(f'Datamosh prebake: unknown mode {mode!r}, aborting.')
+        return False
+    cmd += [
         '-c:v', 'libx264',
         '-preset', 'slow',
         '-bf', '0',
@@ -112,8 +129,29 @@ def prepare_datamosh_source(video_path: str, output_path: str,
         '-an',
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True)
+    # Scale the timeout to the source duration. `-preset slow` plus a
+    # 30-min input would blow past any fixed ceiling; without a timeout
+    # ffmpeg occasionally hangs on bad streams indefinitely.
+    try:
+        _cap = cv2.VideoCapture(video_path)
+        _fps = float(_cap.get(cv2.CAP_PROP_FPS) or 24.0)
+        _n = float(_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+        _cap.release()
+        src_dur = (_n / _fps) if _fps > 0 else 0.0
+    except Exception:
+        src_dur = 0.0
+    # `slow` preset is roughly 1× realtime on modern hardware; allow 4×
+    # headroom and clamp to a 5-min floor / 60-min ceiling.
+    timeout = int(max(300.0, min(3600.0, 60.0 + src_dur * 4.0)))
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f'Datamosh prebake failed: {exc}')
+        try: os.remove(output_path)
+        except OSError: pass
+        return False
     if result.returncode != 0:
         log(f'Datamosh ffmpeg error: '
             f'{result.stderr[:200].decode(errors="replace")}')
-    return result.returncode == 0
+        return False
+    return True
