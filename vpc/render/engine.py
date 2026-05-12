@@ -455,6 +455,12 @@ class BreakcoreEngine:
                     setattr(mystery, k, float(v))
                 except (TypeError, ValueError):
                     pass
+        # Per-knob always-on flags. Unknown keys silently ignored — keeps
+        # the engine forward/backward-compatible with cfg dialects.
+        for k, v in rc.mystery_always.items():
+            attr = f'always_{k}'
+            if hasattr(mystery, attr):
+                setattr(mystery, attr, bool(v))
 
         chaos = rc.chaos
         flash_chance = min(1.0, rc.flash_chance_base * (0.3 + 0.7 * chaos))

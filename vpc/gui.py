@@ -38,7 +38,7 @@ from vpc.render.quality import (
 from vpc.render.encoders import available_specs as available_encoder_specs
 from vpc.registry import EFFECTS, GROUP_ORDER, default_cfg, bi
 from vpc.registry import ACCORDION_HIDDEN_GROUPS
-from vpc.mystery import MYSTERY_KNOBS
+from vpc.mystery import MYSTERY_KNOBS, MYSTERY_ALWAYS_LABELS
 from vpc.effects.formula import compile_formula
 from vpc.paths import presets_path, temp_preview_path
 
@@ -273,9 +273,13 @@ class MainGUI(tk.Tk):
         # Export
         export_defaults = {'fps': 24.0, 'crf': 22.0, 'custom_w': 1280.0, 'custom_h': 720.0}
         # Mystery
-        mystery_defaults = {f'mystery_{k}': 0.0 for k in
-                            ('VESSEL', 'ENTROPY_7', 'DELTA_OMEGA', 'STATIC_MIND',
-                             'RESONANCE', 'COLLAPSE', 'ZERO', 'FLESH_K', 'DOT')}
+        mystery_keys = ('VESSEL', 'ENTROPY_7', 'DELTA_OMEGA', 'STATIC_MIND',
+                        'RESONANCE', 'COLLAPSE', 'ZERO', 'FLESH_K', 'DOT')
+        mystery_defaults = {f'mystery_{k}': 0.0 for k in mystery_keys}
+        # "Always-on" toggles per mystery knob. Default False — preserves
+        # legacy behaviour bit-identical (mystery golden tests rely on this).
+        mystery_defaults.update({f'always_mystery_{k}': False
+                                 for k in mystery_keys})
 
         # Registry defaults
         reg = default_cfg()
@@ -2288,9 +2292,30 @@ class MainGUI(tk.Tk):
         tk.Label(wr, text='[ UNKNOWN PARAMETERS — USE WITH CAUTION ]',
                  bg=C_SILVER, fg=C_DARK_GRAY,
                  font=('Courier New', 8, 'italic')).pack(pady=(8, 6), padx=10, anchor='w')
+        # Map knob → unique always-label so order in MYSTERY_KNOBS stays
+        # the source of truth for layout while always-names live next to
+        # the engine-side flags in vpc/mystery.py.
+        always_label_by_key = dict(MYSTERY_ALWAYS_LABELS)
         for label, key in MYSTERY_KNOBS:
             self._row_with_help(wr, label, '?', mono=True)
             self._slider(wr, key, 0.0, 1.0)
+            # `key` is `mystery_<KNOB>` — derive the engine knob name and
+            # look up its cryptic always-label. Skip silently if a knob
+            # ever lacks a label (shouldn't happen — guarded by tests).
+            knob = key[len('mystery_'):]
+            always_text = always_label_by_key.get(knob)
+            if always_text is None:
+                continue
+            arow = tk.Frame(wr, bg=C_SILVER)
+            arow.pack(fill='x', padx=(20, 8), pady=(0, 6))
+            tk.Checkbutton(arow, text=always_text,
+                           variable=self.vars[f'always_mystery_{knob}'],
+                           bg=C_SILVER, fg='#3A3A60',
+                           activebackground=C_SILVER,
+                           selectcolor=C_SILVER,
+                           font=('Courier New', 8, 'bold'),
+                           padx=0, pady=0, bd=0,
+                           highlightthickness=0).pack(side='left')
 
     # ─── file selection ───
     def sel_audio(self):
@@ -2357,10 +2382,13 @@ class MainGUI(tk.Tk):
                                        int(cfg.pop('fx_overlay_ck_g', 255)),
                                        int(cfg.pop('fx_overlay_ck_b', 0))]
 
+        _mystery_keys = ('VESSEL', 'ENTROPY_7', 'DELTA_OMEGA',
+                         'STATIC_MIND', 'RESONANCE', 'COLLAPSE',
+                         'ZERO', 'FLESH_K', 'DOT')
         cfg['mystery'] = {k: float(cfg.pop(f'mystery_{k}', 0.0))
-                          for k in ('VESSEL', 'ENTROPY_7', 'DELTA_OMEGA',
-                                    'STATIC_MIND', 'RESONANCE', 'COLLAPSE',
-                                    'ZERO', 'FLESH_K', 'DOT')}
+                          for k in _mystery_keys}
+        cfg['mystery_always'] = {k: bool(cfg.pop(f'always_mystery_{k}', False))
+                                 for k in _mystery_keys}
         return cfg
 
     def apply_preset(self, name):
@@ -2483,6 +2511,13 @@ class MainGUI(tk.Tk):
                 key = f'mystery_{k}'
                 if key in self.vars:
                     self.vars[key].set(v)
+        # Restore "always" flags. Older presets predate this field, so
+        # missing entries fall back to False (legacy behaviour).
+        if 'mystery_always' in cfg:
+            for k, v in cfg['mystery_always'].items():
+                key = f'always_mystery_{k}'
+                if key in self.vars:
+                    self.vars[key].set(bool(v))
         self.var_silence_mode.set(cfg.get('silence_mode', 'none'))
         self.var_resolution_mode.set(cfg.get('resolution_mode', 'preset'))
         self._sync_formula_editor_from_var()

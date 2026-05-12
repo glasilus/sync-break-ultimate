@@ -205,6 +205,12 @@ class RenderConfig:
     def mystery(self) -> dict:
         return dict(self.raw.get('mystery', {}))
 
+    @property
+    def mystery_always(self) -> dict:
+        """Per-knob always-on flags (gate bypass). Default empty → all off,
+        matching legacy behaviour for presets that predate this field."""
+        return dict(self.raw.get('mystery_always', {}))
+
     # ----- specials -----
     @property
     def stutter_enabled(self) -> bool:

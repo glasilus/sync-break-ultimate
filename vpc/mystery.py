@@ -40,6 +40,20 @@ class MysterySection:
         self.ZERO = 0.0
         self.FLESH_K = 0.0
         self.DOT = 0.0
+        # "Always-on" per-knob bypass flags. When True AND the knob is > 0,
+        # the per-frame random gate (and any soft thresholds) for that knob
+        # are skipped — the block fires every frame. Default False keeps
+        # legacy behaviour bit-identical, which is what the golden tests
+        # in tests/test_mystery.py rely on.
+        self.always_VESSEL = False
+        self.always_ENTROPY_7 = False
+        self.always_DELTA_OMEGA = False
+        self.always_STATIC_MIND = False
+        self.always_RESONANCE = False
+        self.always_COLLAPSE = False
+        self.always_ZERO = False
+        self.always_FLESH_K = False
+        self.always_DOT = False
         self._feedback = FeedbackLoopEffect(enabled=True, chance=1.0)
         self._ghost = GhostTrailsEffect(enabled=True, chance=1.0)
         self._scanlines = ScanLinesEffect(enabled=True, chance=1.0)
@@ -97,14 +111,27 @@ class MysterySection:
         _ds = self.DOT * self.STATIC_MIND
         _zf = self.ZERO * self.FLESH_K
 
-        _rg = seg.rms * (1.0 + self.DELTA_OMEGA * 3.0)
+        # DELTA_OMEGA's "BREACH" toggle pins the threshold-shift multiplier
+        # at its maximum (slider=1.0 equivalent). The knob value still gates
+        # whether the toggle is meaningful — at knob=0 nothing triggers it.
+        if self.always_DELTA_OMEGA and self.DELTA_OMEGA > 0:
+            _rg = seg.rms * 4.0
+        else:
+            _rg = seg.rms * (1.0 + self.DELTA_OMEGA * 3.0)
 
         def _gate(base, rms_w=0.0, sign=1.0):
             return random.random() < min(1.0, max(0.0, base + sign * rms_w * _rg))
 
+        def _force(knob_name):
+            """Bypass the random gate for `knob_name` if always-flag set
+            AND knob value > 0."""
+            return (getattr(self, f'always_{knob_name}', False)
+                    and getattr(self, knob_name, 0.0) > 0)
+
         # ── FLESH_K ──
         flesh_thr = 0.33 - _zf * 0.18 + self.ENTROPY_7 * 0.08
-        if self.FLESH_K > flesh_thr and _gate(self.FLESH_K, rms_w=0.2, sign=-1.0):
+        if _force('FLESH_K') or (self.FLESH_K > flesh_thr
+                                 and _gate(self.FLESH_K, rms_w=0.2, sign=-1.0)):
             result = cv2.cvtColor(result, cv2.COLOR_RGB2YCrCb)
             if self.FLESH_K > 0.66 - _ve * 0.12:
                 result = cv2.cvtColor(result, cv2.COLOR_YCrCb2RGB)
@@ -126,7 +153,7 @@ class MysterySection:
         # the polar centre splits — two offset polar morphs are blended,
         # the "три вещи уходят из одного момента" hinted in the docs.
         ev = self.VESSEL * (1.0 + self.DOT * 0.6)
-        if ev > 0 and _gate(ev, rms_w=0.1):
+        if ev > 0 and (_force('VESSEL') or _gate(ev, rms_w=0.1)):
             h_v, w_v = result.shape[:2]
             t = self._t * 0.05
             radius = float(np.hypot(w_v, h_v) * 0.5)
@@ -178,7 +205,8 @@ class MysterySection:
                 ).astype(np.float32)
 
         # ── STATIC_MIND ──
-        if self.STATIC_MIND > 0 and _gate(self.STATIC_MIND, rms_w=0.15):
+        if self.STATIC_MIND > 0 and (_force('STATIC_MIND')
+                                     or _gate(self.STATIC_MIND, rms_w=0.15)):
             h_sm, w_sm = result.shape[:2]
             gray_sm = cv2.cvtColor(result[:, :, :3], cv2.COLOR_RGB2GRAY).astype(np.float32)
             gx = cv2.Sobel(gray_sm, cv2.CV_32F, 1, 0, ksize=3)
@@ -200,7 +228,8 @@ class MysterySection:
                 result = self._resonant._apply(result, _reseg(seg, ring_c), draft)
 
         # ── RESONANCE ──
-        if self.RESONANCE > 0 and _gate(self.RESONANCE, rms_w=0.5):
+        if self.RESONANCE > 0 and (_force('RESONANCE')
+                                   or _gate(self.RESONANCE, rms_w=0.5)):
             self._resonant.q = 3.0 + self.RESONANCE * 27.0 + self.ENTROPY_7 * 14.0
             self._resonant.cutoff = 0.04 + self.RESONANCE * 0.12
             result = self._resonant._apply(result, _reseg(seg, self.RESONANCE), draft)
@@ -212,7 +241,8 @@ class MysterySection:
                 result = self._fft_phase._apply(result, _reseg(seg, self.RESONANCE - fft_thr), draft)
 
         # ── COLLAPSE ──
-        if self.COLLAPSE > 0 and _gate(self.COLLAPSE, rms_w=0.2):
+        if self.COLLAPSE > 0 and (_force('COLLAPSE')
+                                  or _gate(self.COLLAPSE, rms_w=0.2)):
             h_c, w_c = result.shape[:2]
             n_sorted = int(h_c * self.COLLAPSE * 0.85)
             if n_sorted > 0:
@@ -254,7 +284,8 @@ class MysterySection:
         # flat regions hold. Sources of swap material are taken from VESSEL's
         # accumulator when VESSEL is active ("то, что накопил VESSEL,
         # ENTROPY_7 выращивает внутри") — otherwise from the live frame.
-        if self.ENTROPY_7 > 0 and _gate(self.ENTROPY_7, rms_w=0.1):
+        if self.ENTROPY_7 > 0 and (_force('ENTROPY_7')
+                                   or _gate(self.ENTROPY_7, rms_w=0.1)):
             depth = max(1, int(self.ENTROPY_7 * 4) + (1 if _ve > 0.25 else 0))
             depth = min(5, depth)
             source_pool = result.copy()
@@ -316,7 +347,8 @@ class MysterySection:
         # the recall mask is biased toward edges of the live frame
         # ("FLESH_K усиливает то, что ZERO раскрывает"), so the recall
         # punches out exactly the contours instead of being a uniform XOR.
-        if self.ZERO > 0 and _gate(self.ZERO - 0.05, rms_w=-0.05):
+        if self.ZERO > 0 and (_force('ZERO')
+                              or _gate(self.ZERO - 0.05, rms_w=-0.05)):
             n_hist = len(self._zero_history)
             lag = max(2, int(self.ZERO * (self._zero_history_max - 4)))
             lag = min(lag, n_hist - 1) if n_hist > 1 else 0
@@ -359,7 +391,7 @@ class MysterySection:
         # one past frame, and inside that frame every row reads from yet
         # another past frame, so a single output pixel encodes two distinct
         # past times.
-        if self.DOT > 0 and _gate(self.DOT, rms_w=0.3):
+        if self.DOT > 0 and (_force('DOT') or _gate(self.DOT, rms_w=0.3)):
             depth = max(2, int(self.DOT * 6 + self.VESSEL * 8))
             self._frame_buffer.append(result.copy())
             if len(self._frame_buffer) > depth + 4:
@@ -424,4 +456,19 @@ MYSTERY_KNOBS = [
     ('000', 'mystery_ZERO'),
     ('FLESH_K', 'mystery_FLESH_K'),
     ('[  .  ]', 'mystery_DOT'),
+]
+
+# "Always-on" labels per knob — analogous to `always_<key>` for ordinary
+# effects but in the mystery aesthetic: each gets a unique cryptic name.
+# Order matches MYSTERY_KNOBS. The cfg key is `always_mystery_<KEY>`.
+MYSTERY_ALWAYS_LABELS = [
+    ('VESSEL',       'PERPETUAL'),
+    ('ENTROPY_7',    'UNCHAINED'),
+    ('DELTA_OMEGA',  'BREACH//'),
+    ('STATIC_MIND',  'awake.always'),
+    ('RESONANCE',    '__SUSTAIN'),
+    ('COLLAPSE',     'INEVITABLE//'),
+    ('ZERO',         'NULL.LOCK'),
+    ('FLESH_K',      'BLEED'),
+    ('DOT',          '[ * ]'),
 ]
